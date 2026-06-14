@@ -123,6 +123,7 @@ class ReverseProxy:
             timeout=httpx.Timeout(timeout=None),  # no timeout — LLM calls can be long
             limits=httpx.Limits(max_connections=500, max_keepalive_connections=100),
             follow_redirects=True,
+            trust_env=False,
         )
 
     async def stop(self) -> None:
@@ -480,6 +481,7 @@ class ReverseProxy:
                 timeout=httpx.Timeout(timeout=None),
                 limits=httpx.Limits(max_connections=1, max_keepalive_connections=0),
                 follow_redirects=True,
+                trust_env=False,
             )
             retry_upstream = retry_client.stream(
                 method=request.method,

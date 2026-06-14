@@ -181,7 +181,7 @@ class SessionRouter:
     async def start_health_checks(self) -> None:
         if self._health_task is not None:
             return
-        self._http = httpx.AsyncClient(timeout=httpx.Timeout(5.0))
+        self._http = httpx.AsyncClient(timeout=httpx.Timeout(5.0), trust_env=False)
         self._health_task = asyncio.create_task(self._health_loop())
 
     async def stop_health_checks(self) -> None:

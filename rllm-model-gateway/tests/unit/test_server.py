@@ -180,6 +180,36 @@ class TestProxy:
         assert "stop_reason" not in choice
 
     @pytest.mark.asyncio
+    async def test_worker_proxy_ignores_env_proxy(self, monkeypatch: pytest.MonkeyPatch, mock_vllm: MockVLLMServer):
+        """Internal worker traffic must not be routed through shell proxy settings."""
+        for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+            monkeypatch.setenv(key, "http://127.0.0.1:9")
+        for key in ("NO_PROXY", "no_proxy"):
+            monkeypatch.setenv(key, "")
+
+        app = create_app(
+            GatewayConfig(
+                store_worker="memory",
+                workers=[{"url": f"{mock_vllm.url}/v1", "worker_id": "w0"}],
+                health_check_interval=999,
+            )
+        )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as proxied_client:
+            resp = await proxied_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "mock-model",
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+            )
+
+        assert resp.status_code == 200
+        assert resp.json()["choices"][0]["message"]["content"] == "Hello from mock!"
+
+    @pytest.mark.asyncio
     async def test_chat_completions_with_session(self, client: httpx.AsyncClient):
         """POST /sessions/{sid}/v1/chat/completions — should proxy and capture trace."""
         resp = await client.post(

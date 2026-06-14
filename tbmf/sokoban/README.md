@@ -33,7 +33,7 @@ python3 tbmf/sokoban/prepare_sokoban_data.py
 Default generation matches the LaMer Sokoban Qwen3-4B prepared data and
 experiment setup: `train_size=8`, `test_size=128`, `env_seed=4608`,
 `dim_room=6x6`, `num_boxes=2`, `search_depth=100`, `max_steps=30`,
-`max_sol_steps=21`, `actions_per_turn=3`, `max_turns=7`, and
+`max_sol_steps=21`, `actions_per_turn=3`, `max_turns=20`, and
 `mode=text_with_row_numbers`. LaMer trains with `data.train_batch_size=8`
 and validates with `data.val_batch_size=16` over the 128-row test file.
 

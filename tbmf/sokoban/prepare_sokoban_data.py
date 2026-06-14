@@ -24,9 +24,9 @@ LAMER_SOKOBAN_CONFIG = {
     "max_steps": 30,
     "search_depth": 100,
     "min_steps": 5,
-    "max_sol_steps": 21,
+    "max_sol_steps": 100,
     "actions_per_turn": 3,
-    "max_turns": 7,
+    "max_turns": 20,
     "mode": "text_with_row_numbers",
 }
 
@@ -98,6 +98,7 @@ def _generate_puzzle_state(
 
 
 def prepare_sokoban_data(
+    dataset_name: str = "sokoban",
     train_size: int = LAMER_SOKOBAN_CONFIG["train_size"],
     test_size: int = LAMER_SOKOBAN_CONFIG["test_size"],
     dim_room: tuple[int, int] = LAMER_SOKOBAN_CONFIG["dim_room"],
@@ -163,8 +164,8 @@ def prepare_sokoban_data(
         high=2**32 - 1,
     )
 
-    train_dataset = DatasetRegistry.register_dataset("sokoban", train_rows, "train")
-    test_dataset = DatasetRegistry.register_dataset("sokoban", test_rows, "test")
+    train_dataset = DatasetRegistry.register_dataset(dataset_name, train_rows, "train")
+    test_dataset = DatasetRegistry.register_dataset(dataset_name, test_rows, "test")
     return train_dataset, test_dataset
 
 
@@ -180,6 +181,7 @@ def _parse_dim(text: str) -> tuple[int, int]:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Prepare Sokoban datasets for rLLM")
+    ap.add_argument("--dataset-name", default="sokoban")
     ap.add_argument("--train-size", type=int, default=LAMER_SOKOBAN_CONFIG["train_size"])
     ap.add_argument("--test-size", type=int, default=LAMER_SOKOBAN_CONFIG["test_size"])
     ap.add_argument("--dim-room", type=_parse_dim, default=LAMER_SOKOBAN_CONFIG["dim_room"])
@@ -194,6 +196,7 @@ def main() -> None:
     args = ap.parse_args()
 
     train, test = prepare_sokoban_data(
+        dataset_name=args.dataset_name,
         train_size=args.train_size,
         test_size=args.test_size,
         dim_room=args.dim_room,
