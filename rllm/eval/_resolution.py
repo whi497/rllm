@@ -25,7 +25,10 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python < 3.11
+    import tomli as tomllib
 
 from rllm.eval.module_evaluator import PythonModuleEvaluator, _coerce_eval_result
 from rllm.eval.script_evaluator import ShellScriptEvaluator
