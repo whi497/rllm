@@ -19,7 +19,9 @@ class TraceRecord(BaseModel):
     response_message: dict[str, Any] = Field(default_factory=dict)
     completion_token_ids: list[int] = Field(default_factory=list)
     logprobs: list[float] | None = None
+    routing_matrices: list[str] | None = None
     finish_reason: str | None = None
+    weight_version: int | None = None
     # Metadata
     latency_ms: float = 0.0
     token_counts: dict[str, int] = Field(default_factory=dict)
@@ -119,6 +121,9 @@ class GatewayConfig(BaseModel):
     health_check_interval: float = 10.0
     log_level: str = "INFO"
     sync_traces: bool = False
-    sampling_params_priority: str = "client"
     model: str | None = None  # When set, overrides ``body.model``
     max_prompt_length: int | None = None  # When set, rejects prompts exceeding this token count
+    cumulative_token_mode: bool = False
+    # renderers family for the cumulative-mode bridge. Check supported model families
+    # in MODEL_RENDERER_MAP of https://github.com/PrimeIntellect-ai/renderers/blob/main/renderers/base.py
+    renderer_family: str = "auto"

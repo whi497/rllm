@@ -148,6 +148,52 @@ def create_app(
             )
         )
 
+    # Build the renderer for cumulative token mode. The renderer owns
+    # message↔token conversion and the cross-turn bridge (see
+    # token_accumulator.TokenAccumulator). The tokenizer is loaded from the
+    # served model path (``config.model``), which we assume is a complete,
+    # unmodified HuggingFace checkpoint.
+    renderer = None
+    if config.cumulative_token_mode:
+        if not config.model:
+            raise ValueError("cumulative_token_mode=True requires 'model' to be set in GatewayConfig (path to the served HuggingFace checkpoint).")
+        try:
+            from renderers import create_renderer
+            from transformers import AutoTokenizer
+        except ImportError as err:
+            raise ImportError("cumulative_token_mode requires the 'renderers' and 'transformers' packages. Install them with: pip install renderers transformers") from err
+
+        tokenizer = AutoTokenizer.from_pretrained(config.model)
+
+        # renderer_family="auto" lets renderers resolve the family by matching the
+        # tokenizer's name_or_path against its MODEL_RENDERER_MAP. This succeeds
+        # when ``model`` is a canonical HF id (e.g. "Qwen/Qwen3-8B") but misses for
+        # a local/custom checkpoint path, which falls back to DefaultRenderer (whose
+        # bridge_to_next_turn always returns None, disabling drift protection). When
+        # serving from a path, set renderer_family explicitly. Supported families /
+        # MODEL_RENDERER_MAP:
+        #   https://github.com/PrimeIntellect-ai/renderers/blob/main/renderers/base.py
+        renderer = create_renderer(tokenizer, renderer=config.renderer_family)
+        logger.info(
+            "Built %s (family=%r) from %s for cumulative token mode",
+            type(renderer).__name__,
+            config.renderer_family,
+            config.model,
+        )
+        if type(renderer).__name__ == "DefaultRenderer":
+            raise ValueError(
+                f"Cumulative token mode resolved to DefaultRenderer for renderer_family="
+                f"{config.renderer_family!r} (model={config.model!r}). DefaultRenderer "
+                "provides no cross-turn bridge, so drift-free token forwarding is disabled. "
+                "renderer_family='auto' only resolves when 'model' is a canonical HuggingFace "
+                "id present in renderers' MODEL_RENDERER_MAP; a local/custom checkpoint path "
+                "will not match. Either pass a recognized HF id as 'model', or set "
+                "renderer_family explicitly to match your model (e.g. 'qwen3', 'qwen3.5', "
+                "'qwen3.6', 'glm-5', 'deepseek-v3', 'gpt-oss'). Check supported families in "
+                "MODEL_RENDERER_MAP of: https://github.com/PrimeIntellect-ai/renderers/blob/"
+                "main/renderers/base.py"
+            )
+
     proxy = ReverseProxy(
         router=router,
         store=store,
@@ -155,6 +201,8 @@ def create_app(
         sync_traces=config.sync_traces,
         local_handler=local_handler,
         max_prompt_length=config.max_prompt_length,
+        cumulative_token_mode=config.cumulative_token_mode,
+        renderer=renderer,
     )
     sessions = SessionManager(store)
 
@@ -182,7 +230,6 @@ def create_app(
         add_logprobs=config.add_logprobs,
         add_return_token_ids=config.add_return_token_ids,
         sessions=sessions,
-        sampling_params_priority=config.sampling_params_priority,
         model=config.model,
     )
 
@@ -221,7 +268,24 @@ def create_app(
         result = await sessions.list_sessions(since=since, limit=limit)
         return [s.model_dump() for s in result]
 
-    @app.get("/sessions/{session_id}")
+    # NOTE: ``{session_id:path}`` allows multi-segment IDs (e.g.
+    # ``harbor/hello-world:0`` from namespaced Harbor tasks). FastAPI/
+    # Starlette match routes in declaration order, so the more-specific
+    # ``/sessions/{session_id:path}/traces`` MUST be declared before the
+    # bare ``/sessions/{session_id:path}`` — otherwise the bare route's
+    # greedy capture swallows ``/sessions/foo/traces`` as
+    # ``session_id="foo/traces"`` and the traces endpoint is unreachable.
+
+    @app.get("/sessions/{session_id:path}/traces")
+    async def get_session_traces(
+        session_id: str,
+        since: float | None = Query(None),
+        limit: int | None = Query(None),
+    ):
+        traces = await store.get_session_traces(session_id, since=since, limit=limit)
+        return traces
+
+    @app.get("/sessions/{session_id:path}")
     async def get_session(session_id: str):
         info = await sessions.get_session_info(session_id)
         if info is None:
@@ -231,17 +295,9 @@ def create_app(
             )
         return info.model_dump()
 
-    @app.get("/sessions/{session_id}/traces")
-    async def get_session_traces(
-        session_id: str,
-        since: float | None = Query(None),
-        limit: int | None = Query(None),
-    ):
-        traces = await store.get_session_traces(session_id, since=since, limit=limit)
-        return traces
-
-    @app.delete("/sessions/{session_id}")
+    @app.delete("/sessions/{session_id:path}")
     async def delete_session(session_id: str):
+        proxy._accumulators.pop(session_id, None)
         count = await sessions.delete_session(session_id)
         return {"deleted": count}
 
@@ -251,6 +307,7 @@ def create_app(
         session_ids = body.get("session_ids", [])
         total = 0
         for sid in session_ids:
+            proxy._accumulators.pop(sid, None)
             total += await sessions.delete_session(sid)
         return {"deleted": total}
 
@@ -340,6 +397,22 @@ def create_app(
         # Placeholder for hot-reload
         return {"status": "ok"}
 
+    @app.get("/admin/weight_version")
+    async def get_weight_version():
+        return {"weight_version": proxy.weight_version}
+
+    @app.post("/admin/weight_version")
+    async def set_weight_version(request: Request):
+        body = await _safe_json(request)
+        version = body.get("weight_version")
+        if version is None:
+            return JSONResponse(status_code=400, content={"error": "weight_version is required"})
+        try:
+            proxy.weight_version = int(version)
+        except (TypeError, ValueError):
+            return JSONResponse(status_code=400, content={"error": f"invalid weight_version: {version!r}"})
+        return {"weight_version": proxy.weight_version}
+
     # -- Proxy catch-all (must be last) ------------------------------------
 
     @app.api_route(
@@ -425,12 +498,14 @@ def _load_config(args: argparse.Namespace) -> GatewayConfig:
         data["log_level"] = args.log_level
     if getattr(args, "store", None) is not None:
         data["store_worker"] = args.store
-    if getattr(args, "sampling_params_priority", None) is not None:
-        data["sampling_params_priority"] = args.sampling_params_priority
     if getattr(args, "model", None) is not None:
         data["model"] = args.model
     if getattr(args, "max_prompt_length", None) is not None:
         data["max_prompt_length"] = args.max_prompt_length
+    if getattr(args, "cumulative_token_mode", False):
+        data["cumulative_token_mode"] = True
+    if getattr(args, "renderer_family", None) is not None:
+        data["renderer_family"] = args.renderer_family
 
     # Workers from CLI --worker flags (WorkerConfig validator auto-splits URLs)
     worker_urls = getattr(args, "worker", None) or []
@@ -460,17 +535,26 @@ def main() -> None:
     parser.add_argument("--store", type=str, default=None, choices=["sqlite", "memory"])
     parser.add_argument("--log-level", type=str, default=None)
     parser.add_argument(
-        "--sampling-params-priority",
-        type=str,
-        default=None,
-        choices=["client", "session"],
-        help="Conflict resolution for sampling params: 'client' (default) or 'session'.",
-    )
-    parser.add_argument(
         "--model",
         type=str,
         default=None,
         help="If set, the gateway rewrites every request body's 'model' field to this value before forwarding.",
+    )
+    parser.add_argument(
+        "--cumulative-token-mode",
+        action="store_true",
+        default=False,
+        help="Enable cumulative token mode for drift-free multi-turn RL training. Loads the tokenizer from --model (the served HuggingFace checkpoint).",
+    )
+    parser.add_argument(
+        "--renderer-family",
+        type=str,
+        default=None,
+        help="renderers family for the cumulative-mode bridge (e.g. 'qwen3', 'qwen3.5', "
+        "'qwen3.6', 'glm-5', 'deepseek-v3', 'gpt-oss'). Renderers can auto infer it if --model "
+        "is a huggingface model id, but if --model is a local path, you must explicitly set it. "
+        "Check the supported model families in MODEL_RENDERER_MAP of "
+        "https://github.com/PrimeIntellect-ai/renderers/blob/main/renderers/base.py",
     )
     parser.add_argument(
         "--max-prompt-length",

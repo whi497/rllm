@@ -1,6 +1,15 @@
-from dataclasses import dataclass
+from __future__ import annotations
 
-from rllm.tools.tool_base import ToolCall
+import logging
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from rllm.engine.rollout.types import TokenInput, Tokenizer, TokenOutput
+    from rllm.parser import ChatTemplateParser
+    from rllm.tools.tool_base import ToolCall
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -9,14 +18,17 @@ class ModelOutput:
     content: str | None = None
     reasoning: str | None = None
     tool_calls: list[ToolCall] | None = None
-    prompt_ids: list[int] | None = None
+    prompt_ids: TokenInput | None = None
     completion_ids: list[int] | None = None
     multi_modal_inputs: dict[str, list] | None = None
     logprobs: list[float] | None = None  # completion logprobs
     prompt_logprobs: list[float] | None = None  # prompt logprobs aligned to prompt_ids
+    routing_matrices: list[str] | None = None  # per-token routing matrices (R3, transient)
     prompt_length: int = 0
     completion_length: int = 0
     finish_reason: str | None = None
+    weight_version: int | None = None  # policy version at time of generation
+    metrics: dict | None = None  # per-turn server metrics (e.g. ttft, queue durations)
 
     def to_dict(self):
         return {
@@ -29,13 +41,18 @@ class ModelOutput:
             "multi_modal_inputs": self.multi_modal_inputs,
             "logprobs": self.logprobs,
             "prompt_logprobs": self.prompt_logprobs,
+            "routing_matrices": self.routing_matrices,
             "prompt_length": self.prompt_length,
             "completion_length": self.completion_length,
             "finish_reason": self.finish_reason,
+            "weight_version": self.weight_version,
+            "metrics": self.metrics,
         }
 
     @classmethod
     def from_dict(cls, data: dict):
+        from rllm.tools.tool_base import ToolCall
+
         return cls(
             text=data.get("text"),
             content=data.get("content"),
@@ -46,18 +63,47 @@ class ModelOutput:
             multi_modal_inputs=data.get("multi_modal_inputs"),
             logprobs=data.get("logprobs"),
             prompt_logprobs=data.get("prompt_logprobs"),
+            routing_matrices=data.get("routing_matrices"),
             prompt_length=data.get("prompt_length", 0),
             completion_length=data.get("completion_length", 0),
             finish_reason=data.get("finish_reason"),
+            weight_version=data.get("weight_version"),
+            metrics=data.get("metrics"),
         )
 
 
 class RolloutEngine:
+    chat_parser: ChatTemplateParser | None = None
+    tokenizer: Tokenizer | None = None
+    is_validation: bool = False  # flag enabled/disabled by AgentWorkflowEngine.execute_tasks
+
     def __init__(self, *args, **kwargs):
-        pass
+        self.weight_version: int = 0
+
+    # --- Model response ---
+    async def _get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
+        raise NotImplementedError(f"_get_model_response is not implemented for {self.__class__.__name__}")
 
     async def get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
-        raise NotImplementedError("get_model_response is not implemented")
+        weight_version = self.weight_version
+        result = await self._get_model_response(messages, **kwargs)
+        result.weight_version = weight_version
+        return result
+
+    def assemble_model_output(self, token_input: TokenInput, token_output: TokenOutput) -> ModelOutput:
+        """
+        Assemble model output from a token output.
+        """
+        raise NotImplementedError("assemble_model_output is not implemented")
+
+    async def get_token_output_from_token_input(self, token_input: TokenInput, **kwargs) -> TokenOutput:
+        """Obtain the token output from the given token input."""
+        raise NotImplementedError("get_token_output_from_token_input is not implemented")
+
+    @property
+    def supports_token_in_token_out(self) -> bool:
+        """Whether the engine supports token-in-token-out (TITO) generation. Defaults to false."""
+        return False
 
     async def wake_up(self):
         pass

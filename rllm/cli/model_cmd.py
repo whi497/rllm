@@ -8,10 +8,11 @@ Subcommands:
 
 from __future__ import annotations
 
+import os
+
 import click
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
-from rich.table import Table
 
 from rllm.cli._ui import (
     _mask_key,
@@ -19,6 +20,8 @@ from rllm.cli._ui import (
     _select_model,
     _select_provider,
     console,
+    fail,
+    info_panel,
 )
 from rllm.eval.config import (
     PROVIDER_ENV_KEYS,
@@ -29,15 +32,45 @@ from rllm.eval.config import (
 )
 
 
+def _env_key_value(env_key: str) -> str:
+    """Resolve an API key from the environment, falling back to a ``.env`` file.
+
+    Checks ``os.environ`` first, then a ``.env`` in the current directory so the
+    user can just press Enter at the prompt instead of re-typing the key.
+    """
+    if not env_key:
+        return ""
+    val = os.environ.get(env_key, "")
+    if val:
+        return val
+    env_path = os.path.join(os.getcwd(), ".env")
+    if os.path.isfile(env_path):
+        try:
+            with open(env_path) as f:
+                for raw in f:
+                    line = raw.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, _, value = line.partition("=")
+                    if key.strip() == env_key:
+                        return value.strip().strip('"').strip("'")
+        except OSError:
+            pass
+    return ""
+
+
 def _prompt_api_key(provider: str) -> str:
-    """Prompt for an API key, showing env var tip."""
+    """Prompt for an API key, defaulting to the provider's env var if present."""
     env_key = PROVIDER_ENV_KEYS.get(provider, "")
-    if env_key:
+    env_val = _env_key_value(env_key)
+    if env_val:
+        console.print(f"  [dim]Found {env_key} in your environment — press Enter to use it.[/]")
+    elif env_key:
         console.print(f"  [dim]Tip: you can also set {env_key} in your environment[/]")
-    api_key = Prompt.ask("  [label]API key[/]", password=True, console=console).strip()
+    api_key = Prompt.ask("  [label]API key[/]", password=True, default=env_val or None, show_default=False, console=console)
+    api_key = (api_key or "").strip()
     if not api_key:
-        console.print("  [error]API key is required.[/]")
-        raise SystemExit(1)
+        fail("API key is required.")
     return api_key
 
 
@@ -59,31 +92,25 @@ def _provider_label(provider_id: str) -> str:
 
 def _print_config_table(config: RllmConfig, title: str = "[dim]current config[/]", border: str = "dim") -> None:
     """Print a config summary panel."""
-    table = Table(show_header=False, box=None, padding=(0, 2))
-    table.add_column(style="label", width=10)
-    table.add_column()
-    table.add_row("Provider", _provider_label(config.provider))
+    rows = [("Provider", _provider_label(config.provider))]
     if config.base_url:
-        table.add_row("Base URL", f"[dim]{config.base_url}[/]")
+        rows.append(("Base URL", f"[dim]{config.base_url}[/]"))
     if config.provider != "custom" or config.api_key:
-        table.add_row("API key", f"[key]{_mask_key(config.api_key)}[/]")
-    table.add_row("Model", config.model)
-    console.print(Panel(table, title=title, border_style=border, expand=False))
+        rows.append(("API key", f"[key]{_mask_key(config.api_key)}[/]"))
+    rows.append(("Model", config.model))
+    console.print(info_panel(rows, title=title, border=border, label_width=10))
 
 
 def _print_saved_summary(config: RllmConfig, path: str) -> None:
     """Print the saved-config summary panel."""
-    table = Table(show_header=False, box=None, padding=(0, 2))
-    table.add_column(style="label", width=10)
-    table.add_column()
-    table.add_row("Provider", f"[bold]{_provider_label(config.provider)}[/]")
+    rows = [("Provider", f"[val]{_provider_label(config.provider)}[/]")]
     if config.base_url:
-        table.add_row("Base URL", f"[dim]{config.base_url}[/]")
+        rows.append(("Base URL", f"[dim]{config.base_url}[/]"))
     if config.provider != "custom" or config.api_key:
-        table.add_row("API key", f"[key]{_mask_key(config.api_key)}[/]")
-    table.add_row("Model", f"[bold]{config.model}[/]")
-    table.add_row("Saved to", f"[dim]{path}[/]")
-    console.print(Panel(table, title="[success]Configuration saved[/]", border_style="green", expand=False))
+        rows.append(("API key", f"[key]{_mask_key(config.api_key)}[/]"))
+    rows.append(("Model", f"[val]{config.model}[/]"))
+    rows.append(("Saved to", f"[dim]{path}[/]"))
+    console.print(info_panel(rows, title="[success]Configuration saved[/]", border="green", label_width=10))
     console.print()
 
 
@@ -129,15 +156,13 @@ def _do_swap(existing: RllmConfig) -> None:
 
     # Model — pre-select current if same provider
     model_existing = RllmConfig(provider=provider, model=existing.model if existing.provider == provider else "")
-    model = _select_model(provider, model_existing)
+    model = _select_model(provider, model_existing, api_key=api_keys.get(provider))
     console.print()
 
     config = RllmConfig(provider=provider, model=model, api_keys=api_keys, base_url=base_url)
     errors = config.validate()
     if errors:
-        for err in errors:
-            console.print(f"  [error]Error: {err}[/]")
-        raise SystemExit(1)
+        fail("\n".join(errors))
 
     path = save_config(config)
     _print_saved_summary(config, path)
@@ -184,7 +209,7 @@ def model_setup():
         api_key = _prompt_api_key(provider)
     console.print()
 
-    model_name = _select_model(provider, existing)
+    model_name = _select_model(provider, existing, api_key=api_key)
     console.print()
 
     api_keys = {}
@@ -193,9 +218,7 @@ def model_setup():
     config = RllmConfig(provider=provider, model=model_name, api_keys=api_keys, base_url=base_url)
     errors = config.validate()
     if errors:
-        for err in errors:
-            console.print(f"  [error]Error: {err}[/]")
-        raise SystemExit(1)
+        fail("\n".join(errors))
 
     path = save_config(config)
     _print_saved_summary(config, path)
@@ -208,9 +231,7 @@ def model_swap():
 
     console.print()
     if not existing.is_configured():
-        console.print("  [error]Not configured.[/] Run [bold]rllm model setup[/] first.")
-        console.print()
-        raise SystemExit(1)
+        fail("Not configured. Run `rllm model setup` first.")
 
     console.print(Panel("[bold]rLLM Swap[/]", subtitle="[dim]switch provider or model[/]", border_style="cyan", expand=False))
     console.print()

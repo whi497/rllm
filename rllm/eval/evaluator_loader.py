@@ -15,11 +15,11 @@ import os
 from importlib.metadata import entry_points
 from typing import Any
 
+from rllm import paths
 from rllm.eval.types import EvalOutput, Signal
 from rllm.types import Evaluator
 
-_RLLM_HOME = os.environ.get("RLLM_HOME", os.path.expanduser("~/.rllm"))
-_USER_EVALUATORS_FILE = os.path.join(_RLLM_HOME, "evaluators.json")
+_USER_EVALUATORS_FILE = paths.rllm_path("evaluators.json")
 
 
 def _load_user_evaluators() -> dict[str, dict]:
@@ -98,6 +98,7 @@ _EVALUATOR_REGISTRY: dict[str, str] = {
     "ifeval_reward_fn": "rllm.eval.reward_fns.ifeval:evaluate",
     "bfcl_reward_fn": "rllm.eval.reward_fns.bfcl:evaluate",
     "llm_judge_reward_fn": "rllm.eval.reward_fns.llm_judge:evaluate",
+    "claw_eval_reward_fn": "rllm.eval.reward_fns.claw_eval:evaluate",
     "llm_equality_reward_fn": "rllm.eval.reward_fns.llm_equality:evaluate",
     "translation_reward_fn": "rllm.eval.reward_fns.translation:evaluate",
     "widesearch_reward_fn": "rllm.eval.reward_fns.widesearch:evaluate",

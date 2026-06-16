@@ -3,7 +3,7 @@ title: Harnesses
 description: Built-in AgentFlows for common shapes of work — one-shot LLM, bash ReAct, Claude Code
 ---
 
-A *harness* is a built-in [AgentFlow](/core-concepts/agentflow-evaluator): a generic agent program parameterised by the LLM and the task, with no per-benchmark code. rLLM ships three of them. The CLI's `--agent` flag picks one by name; the [Runner](/core-concepts/task-and-runner) drives it like any other AgentFlow.
+A *harness* is a built-in [AgentFlow](/core-concepts/agentflow-evaluator): a generic agent program parameterised by the LLM and the task, with no per-benchmark code. rLLM ships three of them. The CLI's `--agent` flag picks one by name; the [Runner](/core-concepts/tasks#the-runner) drives it like any other AgentFlow.
 
 You don't need a harness for everything — for one-off agents and cookbooks, hand-write an `AgentFlow` class. Reach for a harness when the same agent shape applies to many tasks (every math benchmark needs a one-shot LLM call; every SWE-bench-style task needs an interactive bash loop).
 
@@ -14,6 +14,13 @@ You don't need a harness for everything — for one-off agents and cookbooks, ha
 | `react` | `rllm.harnesses.react.ReActHarness` | One-shot LLM call. Default for data tasks (math, MCQ, QA). |
 | `bash` | `rllm.harnesses.bash.BashHarness` | Multi-turn ReAct bash loop inside a sandbox. Default for sandbox tasks. |
 | `claude-code` | `rllm.harnesses.claude_code.ClaudeCodeHarness` | Run the Claude Code CLI inside the sandbox. |
+| `opencode` | `rllm.harnesses.opencode.OpenCodeHarness` | Run the opencode-ai CLI inside the sandbox. |
+| `mini-swe-agent` | `rllm.harnesses.mini_swe_agent.MiniSweAgentHarness` | Run mini-swe-agent inside the sandbox. |
+| `codex` | `rllm.harnesses.codex.CodexHarness` | Run the OpenAI Codex CLI inside the sandbox. |
+| `qwen-code` | `rllm.harnesses.qwen_code.QwenCodeHarness` | Run the Qwen Code CLI inside the sandbox. |
+| `aider` | `rllm.harnesses.aider.AiderHarness` | Run Paul Gauthier's aider CLI inside the sandbox. |
+| `kimi-cli` | `rllm.harnesses.kimi_cli.KimiCliHarness` | Run Moonshot's kimi-cli inside the sandbox. |
+| `zeroclaw` | `rllm.harnesses.zeroclaw.ZeroClawHarness` | Run the ZeroClaw autonomous-assistant CLI inside the sandbox. |
 
 The registry lives at `rllm/registry/agents.json`. `load_agent("react")` resolves to `ReActHarness()`.
 
@@ -28,7 +35,7 @@ agent = ReActHarness(system_prompt="You are a careful math tutor.")
 episode = agent.run(task, config)
 ```
 
-The harness automatically appends the verifier's expected output format to the system prompt — so a math benchmark gets `"Put your final answer in \boxed{}"` injected, while an MCQ benchmark gets `"Respond with a single letter A, B, C, or D"`. See [Reward functions](/core-concepts/reward-functions) for how that hint is declared.
+The harness automatically appends the verifier's expected output format to the system prompt — so a math benchmark gets `"Put your final answer in \boxed{}"` injected, while an MCQ benchmark gets `"Respond with a single letter A, B, C, or D"`. See [Reward functions](/datasets/reward-functions) for how that hint is declared.
 
 `trajectory.output` is set to the LLM response so reward functions can extract the answer with a uniform contract.
 

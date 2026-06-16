@@ -13,10 +13,9 @@ class AgentTrainer:
     Backends:
 
     * ``verl`` (default): distributed PPO via the verl framework.
-    * ``fireworks``: pipeline-based variant for the Fireworks workflow API.
 
     For the tinker backend, use
-    :class:`rllm.experimental.unified_trainer.AgentTrainer` instead — the
+    :class:`rllm.trainer.unified_trainer.AgentTrainer` instead — the
     legacy tinker workflow trainer was removed when its underlying
     ``TinkerAgentTrainer`` was dropped from the codebase.
 
@@ -32,7 +31,7 @@ class AgentTrainer:
         config: dict[str, Any] | list[str] | None = None,
         train_dataset: Dataset | None = None,
         val_dataset: Dataset | None = None,
-        backend: Literal["verl", "fireworks"] = "verl",
+        backend: Literal["verl"] = "verl",
     ):
         """Initialize the AgentTrainer.
 
@@ -45,10 +44,10 @@ class AgentTrainer:
                 (e.g. ``["data.train_batch_size=8"]``).
             train_dataset: Optional train dataset.
             val_dataset: Optional validation dataset.
-            backend: Training backend (``'verl'`` | ``'fireworks'``). For
-                tinker, use :class:`rllm.experimental.unified_trainer.AgentTrainer`.
+            backend: Training backend (``'verl'``). For tinker, use
+                :class:`rllm.trainer.unified_trainer.AgentTrainer`.
         """
-        assert backend in ("verl", "fireworks"), f"Unsupported backend: {backend}; must be one of ('verl', 'fireworks'). For tinker, use rllm.experimental.unified_trainer.AgentTrainer."
+        assert backend == "verl", f"Unsupported backend: {backend}; must be 'verl'. For tinker, use rllm.trainer.unified_trainer.AgentTrainer."
         self.backend = backend
 
         if workflow_class is None:
@@ -69,8 +68,6 @@ class AgentTrainer:
     def train(self):
         if self.backend == "verl":
             self._train_verl()
-        elif self.backend == "fireworks":
-            self._train_fireworks()
 
     def _train_verl(self):
         """Train using the standard verl backend."""

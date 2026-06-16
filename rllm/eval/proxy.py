@@ -28,7 +28,12 @@ from typing import Any
 import requests
 import yaml
 
+from rllm.env import env_float, env_int
+
 logger = logging.getLogger(__name__)
+
+_NUM_RETRIES = env_int("RLLM_EVAL_PROXY_NUM_RETRIES", 3)  # set env var: export RLLM_EVAL_PROXY_NUM_RETRIES=xxx
+_STARTUP_TIMEOUT_S = env_float("RLLM_EVAL_PROXY_STARTUP_TIMEOUT_S", 30.0)  # set env var: export RLLM_EVAL_PROXY_STARTUP_TIMEOUT_S=xxx
 
 
 class _ProxyManagerBase:
@@ -128,19 +133,25 @@ class EvalProxyManager(_ProxyManagerBase):
         prefix = info.litellm_prefix if info else self.provider
         litellm_model = f"{prefix}/{self.model_name}"
 
+        litellm_params: dict[str, Any] = {
+            "model": litellm_model,
+            "api_key": self.api_key,
+        }
+        # Providers with a fixed OpenAI-compatible endpoint (e.g. Tinker) route
+        # through the ``openai/`` adapter pinned to their ``api_base``.
+        if info and info.base_url:
+            litellm_params["api_base"] = info.base_url
+
         return {
             "model_list": [
                 {
                     "model_name": self.model_name,
-                    "litellm_params": {
-                        "model": litellm_model,
-                        "api_key": self.api_key,
-                    },
+                    "litellm_params": litellm_params,
                 }
             ],
             "litellm_settings": {
                 "drop_params": True,
-                "num_retries": 3,
+                "num_retries": _NUM_RETRIES,
             },
         }
 
@@ -198,7 +209,7 @@ class EvalProxyManager(_ProxyManagerBase):
         )
 
         try:
-            self._wait_for_proxy(timeout=30.0)
+            self._wait_for_proxy(timeout=_STARTUP_TIMEOUT_S)
             logger.info("Proxy server started, sending configuration...")
             self.reload_proxy_config(config=config)
             logger.info("Proxy configuration loaded successfully")

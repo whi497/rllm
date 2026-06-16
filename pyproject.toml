@@ -39,8 +39,8 @@ dependencies = [
     "aiosqlite",
     "hydra-core",
     "codetiming",
-    "tinker ; python_version >= '3.11'",
-    "tinker-cookbook @ git+https://github.com/thinking-machines-lab/tinker-cookbook.git#egg=tinker-cookbook ; python_version >= '3.11'",
+    "tinker>=0.22.2 ; python_version >= '3.11'",
+    "tinker-cookbook>=0.4.1 ; python_version >= '3.11'",
 ]
 
 [project.scripts]
@@ -58,12 +58,8 @@ tools = [
     "mcp",
 ]
 
-eval-protocol = [
-    "eval-protocol",
-]
-
 all = [
-    "rllm[train,rewards,tools,eval-protocol]",
+    "rllm[train,rewards,tools]",
 ]
 
 ui = [
@@ -91,8 +87,13 @@ verl = [
 ]
 
 tinker = [
-    "tinker ; python_version >= '3.11'",
-    "tinker-cookbook @ git+https://github.com/thinking-machines-lab/tinker-cookbook.git#egg=tinker-cookbook ; python_version >= '3.11'",
+    "tinker>=0.22.2 ; python_version >= '3.11'",
+    "tinker-cookbook>=0.4.1 ; python_version >= '3.11'",
+]
+
+fireworks = [
+    "fireworks-ai[training]==1.2.0a79 ; python_version >= '3.11'",
+    "fireworks-training-cookbook @ git+https://github.com/fw-ai/cookbook.git#subdirectory=training ; python_version >= '3.11'",
 ]
 
 opentelemetry = [
@@ -196,12 +197,10 @@ ignore = [
 "examples/fully_async/deepresearch/refine_agent.py" = ["E501"]
 "examples/fully_async/deepresearch/search_agent.py" = ["E501"]
 "examples/countdown/prepare_countdown_data.py" = ["E501"]
-"examples/eval_protocol/prepare_frozen_lake_data.py" = ["E501"]
 "cookbooks/solver_judge_flow/solver_judge_flow.py" = ["E501"]
 "rllm/cli/main.py" = ["E501"]
 "rllm/eval/visualizer.py" = ["E501"]
 "rllm/experimental/rllm_telemetry/examples/experiment_comparison.py" = ["E501"]
-"rllm/experimental/test_examples/opsd/math_opsd_workflow.py" = ["E501"]
 "rllm/harnesses/tools/file_editor_tool.py" = ["E501"]
 "rllm/rewards/math_reward.py" = ["E501"]
 "tests/integration/test_agentcore_runtime.py" = ["E501"]
@@ -213,7 +212,7 @@ where   = ["."]
 include = ["rllm", "rllm.*"]
 
 [tool.setuptools.package-data]
-rllm = ["trainer/config/*.yaml", "registry/*.json", "experimental/config/**/*.yaml"]
+rllm = ["trainer/config/**/*.yaml", "registry/*.json"]
 
 [tool.mypy]
 plugins = ["pydantic.mypy"]

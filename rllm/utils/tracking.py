@@ -29,6 +29,10 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+from rllm.env import env_float
+
+_UI_HTTP_TIMEOUT_S = env_float("RLLM_UI_HTTP_TIMEOUT_S", 5.0)  # set env var: export RLLM_UI_HTTP_TIMEOUT_S=xxx
+
 
 def concat_dict_to_str(dict: dict, step):
     output = [f"step:{step}"]
@@ -339,6 +343,14 @@ class UILogger:
 
         ui_config = load_ui_config()
         api_key = os.getenv("RLLM_API_KEY") or ui_config.get("ui_api_key")
+        ui_url = os.getenv("RLLM_UI_URL")
+        if not ui_url:
+            ui_url = "https://ui.rllm-project.com" if api_key else "http://localhost:3000"
+        self.ui_url = ui_url
+        headers = {}
+        if api_key:
+            headers["X-API-Key"] = api_key
+        self.client = httpx.Client(base_url=self.ui_url, timeout=_UI_HTTP_TIMEOUT_S, headers=headers)
         self._heartbeat_stop = threading.Event()
         self.session_id = None
         self.client = None

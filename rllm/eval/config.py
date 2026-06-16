@@ -9,6 +9,14 @@ import json
 import os
 from dataclasses import dataclass, field
 
+from rllm import paths
+
+# Tinker's (beta) OpenAI-compatible inference endpoint. Used as a fixed
+# ``api_base`` so the Tinker provider routes through LiteLLM's OpenAI adapter
+# exactly like any other provider. See
+# https://tinker-docs.thinkingmachines.ai/tinker/compatible-apis/openai/
+TINKER_OAI_BASE_URL = "https://tinker.thinkingmachines.dev/services/tinker-prod/oai/api/v1"
+
 
 @dataclass
 class ProviderInfo:
@@ -20,6 +28,7 @@ class ProviderInfo:
     env_key: str  # Environment variable for API key, e.g. "OPENAI_API_KEY"
     default_model: str  # Default model name
     models: list[str] = field(default_factory=list)  # Curated model list
+    base_url: str = ""  # Fixed OpenAI-compatible api_base (e.g. Tinker); blank = use provider default
 
 
 PROVIDER_REGISTRY: list[ProviderInfo] = [
@@ -29,25 +38,31 @@ PROVIDER_REGISTRY: list[ProviderInfo] = [
         label="OpenAI",
         litellm_prefix="openai",
         env_key="OPENAI_API_KEY",
-        default_model="gpt-5-mini",
+        default_model="gpt-5.5",
         models=[
             # GPT-5 family
-            "gpt-5-nano",
-            "gpt-5-mini",
-            "gpt-5",
-            "gpt-5.1",
+            "gpt-5.5-pro",
+            "gpt-5.5",
+            "gpt-5.5-chat-latest",
+            "gpt-5.4",
+            "gpt-5.3",
+            "gpt-5.2-pro",
             "gpt-5.2",
+            "gpt-5.1",
+            "gpt-5",
+            "gpt-5-mini",
+            "gpt-5-nano",
             # GPT-4 family
-            "gpt-4.1-nano",
-            "gpt-4.1-mini",
             "gpt-4.1",
-            "gpt-4o-mini",
+            "gpt-4.1-mini",
+            "gpt-4.1-nano",
             "gpt-4o",
+            "gpt-4o-mini",
             # o-series reasoning
-            "o3-mini",
-            "o3",
-            "o3-pro",
             "o4-mini",
+            "o3-pro",
+            "o3",
+            "o3-mini",
         ],
     ),
     ProviderInfo(
@@ -55,11 +70,13 @@ PROVIDER_REGISTRY: list[ProviderInfo] = [
         label="Anthropic",
         litellm_prefix="anthropic",
         env_key="ANTHROPIC_API_KEY",
-        default_model="claude-sonnet-4-6",
+        default_model="claude-opus-4-8",
         models=[
+            "claude-opus-4-8",
+            "claude-opus-4-7",
+            "claude-opus-4-6",
             "claude-sonnet-4-6",
             "claude-haiku-4-5-20251001",
-            "claude-opus-4-6",
         ],
     ),
     ProviderInfo(
@@ -67,16 +84,19 @@ PROVIDER_REGISTRY: list[ProviderInfo] = [
         label="Google Gemini",
         litellm_prefix="gemini",
         env_key="GEMINI_API_KEY",
-        default_model="gemini-2.5-flash",
+        default_model="gemini-3.5-flash",
         models=[
+            # Gemini 3.5 family
+            "gemini-3.5-pro",
+            "gemini-3.5-flash",
             # Gemini 3 family
-            "gemini-3-flash-preview",
-            "gemini-3-pro-preview",
             "gemini-3.1-pro-preview",
+            "gemini-3-pro-preview",
+            "gemini-3-flash-preview",
             # Gemini 2.5 family
+            "gemini-2.5-pro",
             "gemini-2.5-flash",
             "gemini-2.5-flash-lite",
-            "gemini-2.5-pro",
             # Gemini 2.0
             "gemini-2.0-flash",
         ],
@@ -87,12 +107,14 @@ PROVIDER_REGISTRY: list[ProviderInfo] = [
         label="OpenRouter",
         litellm_prefix="openrouter",
         env_key="OPENROUTER_API_KEY",
-        default_model="anthropic/claude-sonnet-4-6",
+        default_model="anthropic/claude-opus-4-8",
         models=[
+            "anthropic/claude-opus-4-8",
             "anthropic/claude-sonnet-4-6",
-            "openai/gpt-5-mini",
-            "google/gemini-2.5-flash",
-            "deepseek/deepseek-chat",
+            "openai/gpt-5.5",
+            "google/gemini-3.5-flash",
+            "deepseek/deepseek-v4-pro",
+            "x-ai/grok-4.3",
             "meta-llama/llama-4-maverick",
         ],
     ),
@@ -101,8 +123,10 @@ PROVIDER_REGISTRY: list[ProviderInfo] = [
         label="Deepseek",
         litellm_prefix="deepseek",
         env_key="DEEPSEEK_API_KEY",
-        default_model="deepseek-chat",
+        default_model="deepseek-v4-flash",
         models=[
+            "deepseek-v4-pro",
+            "deepseek-v4-flash",
             "deepseek-chat",
             "deepseek-reasoner",
         ],
@@ -162,10 +186,15 @@ PROVIDER_REGISTRY: list[ProviderInfo] = [
         label="xAI",
         litellm_prefix="xai",
         env_key="XAI_API_KEY",
-        default_model="grok-3-mini",
+        default_model="grok-4",
         models=[
-            "grok-3-mini",
+            "grok-4.3",
+            "grok-4.20",
+            "grok-4.1",
+            "grok-4-heavy",
+            "grok-4",
             "grok-3",
+            "grok-3-mini",
         ],
     ),
     # --- Chinese providers ---
@@ -174,7 +203,7 @@ PROVIDER_REGISTRY: list[ProviderInfo] = [
         label="Zhipu (GLM)",
         litellm_prefix="zai",
         env_key="ZAI_API_KEY",
-        default_model="glm-4.5",
+        default_model="glm-5",
         models=[
             "glm-5",
             "glm-4.7",
@@ -187,8 +216,9 @@ PROVIDER_REGISTRY: list[ProviderInfo] = [
         label="Kimi (Moonshot)",
         litellm_prefix="moonshot",
         env_key="MOONSHOT_API_KEY",
-        default_model="kimi-k2.5",
+        default_model="kimi-k2.6",
         models=[
+            "kimi-k2.6",
             "kimi-k2.5",
             "kimi-k2-thinking",
         ],
@@ -198,13 +228,37 @@ PROVIDER_REGISTRY: list[ProviderInfo] = [
         label="MiniMax",
         litellm_prefix="minimax",
         env_key="MINIMAX_API_KEY",
-        default_model="MiniMax-M2.7",
+        default_model="MiniMax-M3",
         models=[
+            "MiniMax-M3",
             "MiniMax-M2.7",
             "MiniMax-M2.7-highspeed",
-            "MiniMax-M2.5",
-            "MiniMax-M2.5-highspeed",
         ],
+    ),
+    # --- Tinker (Thinking Machines) — beta OpenAI-compatible endpoint ---
+    ProviderInfo(
+        id="tinker",
+        label="Tinker (Thinking Machines)",
+        # Route through LiteLLM's OpenAI-compatible adapter pointed at the
+        # Tinker endpoint (``base_url`` below). The OAI endpoint accepts both
+        # base model IDs (below) and ``tinker://`` sampler checkpoint paths.
+        litellm_prefix="openai",
+        env_key="TINKER_API_KEY",
+        default_model="Qwen/Qwen3-8B",
+        # Curated fallback shown when the live catalog can't be fetched
+        # (offline / no key). ``rllm model setup`` pulls the full, live list
+        # from ``ServiceClient.get_server_capabilities()`` when possible.
+        models=[
+            "Qwen/Qwen3-8B",
+            "Qwen/Qwen3-32B",
+            "Qwen/Qwen3-4B-Instruct-2507",
+            "Qwen/Qwen3-30B-A3B-Instruct-2507",
+            "meta-llama/Llama-3.1-8B-Instruct",
+            "meta-llama/Llama-3.3-70B-Instruct",
+            "deepseek-ai/DeepSeek-V3.1",
+            "openai/gpt-oss-20b",
+        ],
+        base_url=TINKER_OAI_BASE_URL,
     ),
     # --- Custom endpoint (last) ---
     ProviderInfo(
@@ -223,6 +277,9 @@ DEFAULT_MODELS: dict[str, str] = {p.id: p.default_model for p in PROVIDER_REGIST
 PROVIDER_MODELS: dict[str, list[str]] = {p.id: p.models for p in PROVIDER_REGISTRY if p.models}
 PROVIDER_ENV_KEYS: dict[str, str] = {p.id: p.env_key for p in PROVIDER_REGISTRY if p.env_key}
 
+# Fixed OpenAI-compatible api_base per provider (only set for e.g. Tinker)
+PROVIDER_BASE_URLS: dict[str, str] = {p.id: p.base_url for p in PROVIDER_REGISTRY if p.base_url}
+
 # Index for fast lookup
 _PROVIDER_INDEX: dict[str, ProviderInfo] = {p.id: p for p in PROVIDER_REGISTRY}
 
@@ -232,12 +289,41 @@ def get_provider_info(provider_id: str) -> ProviderInfo | None:
     return _PROVIDER_INDEX.get(provider_id)
 
 
-def _rllm_home() -> str:
-    return os.path.expanduser(os.environ.get("RLLM_HOME", "~/.rllm"))
+def fetch_tinker_models(api_key: str | None = None) -> list[str]:
+    """Return Tinker's live base-model catalog (best-effort).
+
+    Queries ``ServiceClient.get_server_capabilities()`` for the models the
+    Tinker server currently exposes. Any base model here can be sampled via
+    the OpenAI-compatible endpoint without training (a ``tinker://`` sampler
+    checkpoint path also works, but isn't enumerable here).
+
+    Returns an empty list on any failure (tinker not installed, no API key,
+    network error) so callers can fall back to the curated static list.
+    """
+    key = api_key or os.environ.get("TINKER_API_KEY", "")
+    if not key:
+        return []
+    # ServiceClient reads TINKER_API_KEY from the environment; set it for the
+    # duration of the call without clobbering any pre-existing value.
+    prev = os.environ.get("TINKER_API_KEY")
+    os.environ["TINKER_API_KEY"] = key
+    try:
+        import tinker
+
+        caps = tinker.ServiceClient().get_server_capabilities()
+        names = [m.model_name for m in caps.supported_models if m.model_name]
+        return sorted(names)
+    except Exception:
+        return []
+    finally:
+        if prev is None:
+            os.environ.pop("TINKER_API_KEY", None)
+        else:
+            os.environ["TINKER_API_KEY"] = prev
 
 
 def _config_path() -> str:
-    return os.path.join(_rllm_home(), "config.json")
+    return paths.config_path()
 
 
 @dataclass

@@ -21,11 +21,17 @@ logger = logging.getLogger(__name__)
 
 
 def extract_prompt_token_ids(response: dict[str, Any]) -> list[int]:
-    """Extract ``prompt_token_ids`` from the root of a vLLM response."""
+    """Extract ``prompt_token_ids`` from a vLLM response.
+
+    Checks root level first (chat/completions format), then falls back to
+    choices[0].prompt_token_ids (completions format).
+    """
     ids = response.get("prompt_token_ids")
     if ids is None:
-        return []
-    return list(ids)
+        choices = response.get("choices")
+        if choices:
+            ids = choices[0].get("prompt_token_ids")
+    return list(ids) if ids is not None else []
 
 
 def extract_completion_token_ids(response: dict[str, Any]) -> list[int]:
@@ -40,7 +46,12 @@ def extract_completion_token_ids(response: dict[str, Any]) -> list[int]:
 
 
 def extract_logprobs(response: dict[str, Any]) -> list[float]:
-    """Extract per-token logprobs from ``choices[0].logprobs.content``."""
+    """Extract per-token logprobs from a vLLM response.
+
+    Handles both formats:
+    - chat/completions: choices[0].logprobs.content[].logprob
+    - completions: choices[0].logprobs.token_logprobs (flat list)
+    """
     choices = response.get("choices")
     if not choices:
         return []
@@ -48,10 +59,41 @@ def extract_logprobs(response: dict[str, Any]) -> list[float]:
     lp_obj = choices[0].get("logprobs")
     if lp_obj is None:
         return []
+
+    # Chat/completions format: logprobs.content[].logprob
     content = lp_obj.get("content")
-    if content is None:
-        return []
-    return [float(entry["logprob"]) for entry in content if entry and entry.get("logprob") is not None]
+    if content is not None:
+        return [float(entry["logprob"]) for entry in content if entry and entry.get("logprob") is not None]
+
+    # Completions format: logprobs.token_logprobs (flat list of floats)
+    token_logprobs = lp_obj.get("token_logprobs")
+    if token_logprobs is not None:
+        return [float(lp) for lp in token_logprobs if lp is not None]
+
+    return []
+
+
+def extract_weight_version(response: dict[str, Any]) -> int | None:
+    """Per-response weight version stamped by the rollout engine.
+
+    Present on rollout-engine outputs (e.g. the Tinker in-process handler);
+    absent on plain vLLM responses, which fall back to the proxy's tracked
+    version.
+    """
+    version = response.get("weight_version")
+    return int(version) if version is not None else None
+
+
+def extract_routing_matrices(response: dict[str, Any]) -> list[str] | None:
+    """Per-token routing matrices stamped by the rollout engine (R3 router replay).
+
+    Carried on the choice alongside ``token_ids``; absent on plain vLLM responses.
+    """
+    choices = response.get("choices")
+    if not choices:
+        return None
+    rm = choices[0].get("routing_matrices")
+    return list(rm) if rm else None
 
 
 # ------------------------------------------------------------------
@@ -76,7 +118,12 @@ def extract_delta_token_ids(chunk: dict[str, Any]) -> list[int]:
 
 
 def extract_delta_logprobs(chunk: dict[str, Any]) -> list[float]:
-    """Extract logprobs from a single SSE chunk's ``choices[0].logprobs.content``."""
+    """Extract logprobs from a single SSE chunk.
+
+    Handles both formats:
+    - chat/completions streaming: choices[0].logprobs.content[].logprob
+    - completions streaming: choices[0].logprobs.token_logprobs (flat list)
+    """
     choices = chunk.get("choices")
     if not choices:
         return []
@@ -84,9 +131,12 @@ def extract_delta_logprobs(chunk: dict[str, Any]) -> list[float]:
     if not lp:
         return []
     content = lp.get("content")
-    if not content:
-        return []
-    return [float(e["logprob"]) for e in content if e and e.get("logprob") is not None]
+    if content:
+        return [float(e["logprob"]) for e in content if e and e.get("logprob") is not None]
+    token_logprobs = lp.get("token_logprobs")
+    if token_logprobs:
+        return [float(v) for v in token_logprobs if v is not None]
+    return []
 
 
 # ------------------------------------------------------------------
@@ -98,6 +148,7 @@ _VLLM_ROOT_FIELDS = frozenset(
         "prompt_token_ids",
         "prompt_logprobs",
         "kv_transfer_params",
+        "weight_version",
     }
 )
 
@@ -105,6 +156,7 @@ _VLLM_CHOICE_FIELDS = frozenset(
     {
         "token_ids",
         "stop_reason",
+        "routing_matrices",
     }
 )
 
@@ -134,6 +186,7 @@ def build_trace_record(
     latency_ms: float,
     *,
     metadata: dict[str, Any] | None = None,
+    weight_version: int | None = None,
 ) -> TraceRecord:
     """Assemble a ``TraceRecord`` from raw request/response dicts."""
     choices = response_body.get("choices") or []
@@ -146,6 +199,10 @@ def build_trace_record(
     if "completion_tokens" in usage:
         token_counts["completion"] = usage["completion_tokens"]
 
+    response_weight_version = extract_weight_version(response_body)
+    if response_weight_version is not None:
+        weight_version = response_weight_version
+
     return TraceRecord(
         trace_id=str(uuid.uuid4()),
         session_id=session_id,
@@ -155,7 +212,9 @@ def build_trace_record(
         response_message=first_choice.get("message") or first_choice.get("delta") or {},
         completion_token_ids=extract_completion_token_ids(response_body),
         logprobs=extract_logprobs(response_body) or None,
+        routing_matrices=extract_routing_matrices(response_body),
         finish_reason=first_choice.get("finish_reason"),
+        weight_version=weight_version,
         latency_ms=latency_ms,
         token_counts=token_counts,
         timestamp=time.time(),
@@ -172,6 +231,7 @@ def build_trace_record_from_chunks(
     latency_ms: float,
     *,
     metadata: dict[str, Any] | None = None,
+    weight_version: int | None = None,
 ) -> TraceRecord:
     """Assemble a ``TraceRecord`` from accumulated streaming SSE chunks.
 
@@ -240,6 +300,7 @@ def build_trace_record_from_chunks(
         completion_token_ids=completion_ids,
         logprobs=logprobs or None,
         finish_reason=finish_reason,
+        weight_version=weight_version,
         latency_ms=latency_ms,
         token_counts=token_counts,
         timestamp=time.time(),

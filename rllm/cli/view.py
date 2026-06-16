@@ -12,18 +12,16 @@ The dashboard is served by the Python standard library
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import click
-from rich.console import Console
 
-console = Console()
+from rllm import paths
+from rllm.cli._ui import console, fail
 
 
 def _eval_results_root() -> Path:
-    rllm_home = os.path.expanduser(os.environ.get("RLLM_HOME", "~/.rllm"))
-    return Path(rllm_home) / "eval_results"
+    return Path(paths.eval_results_dir())
 
 
 def _resolve_target(arg: str | None) -> Path | None:
@@ -44,14 +42,14 @@ def _resolve_target(arg: str | None) -> Path | None:
     if candidate.is_dir():
         return candidate.resolve()
 
-    raise SystemExit(f"Could not find: {arg!r} (also tried {candidate})")
+    fail(f"Could not find: {arg!r} (also tried {candidate})")
 
 
 @click.command("view")
 @click.argument("target", required=False)
 @click.option("--port", "server_port", default=7860, type=int, help="Local port to serve the viewer on (0 = pick free port).")
 @click.option("--host", default="127.0.0.1", help="Bind host. Default: 127.0.0.1 (loopback only).")
-@click.option("--no-browser", "no_browser", is_flag=True, default=False, help="Do not auto-open the browser.")
+@click.option("--no-browser", is_flag=True, default=False, help="Do not auto-open the browser.")
 def view_cmd(target: str | None, server_port: int, host: str, no_browser: bool):
     """Browse saved eval episodes in a local web viewer."""
     resolved = _resolve_target(target)

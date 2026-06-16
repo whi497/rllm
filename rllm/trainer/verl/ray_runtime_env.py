@@ -67,7 +67,9 @@ def _get_forwarded_env_vars():
 
     forward_prefix = FORWARD_PREFIXES.copy()
 
-    exclude_vars = set()
+    # RLLM_EXCLUDE is a control var read on the launching node; it matches the
+    # RLLM_ prefix but must never be forwarded into workers.
+    exclude_vars = {"RLLM_EXCLUDE"}
     for name in rllm_exclude:
         if "*" in name:  # denote a prefix match, e.g. "VLLM*"
             prefix = name.replace("*", "_")
@@ -122,5 +124,5 @@ def get_ppo_ray_runtime_env():
     if job_runtime_env.get("worker_process_setup_hook") is None:
         # Ray expects a dotted import path (no colon); it does
         # ``module.rpartition('.') -> module + attr`` to load the hook.
-        runtime_env["worker_process_setup_hook"] = "rllm.experimental.verl.patch.apply_all_verl_patches"
+        runtime_env["worker_process_setup_hook"] = "rllm.trainer.verl.patch.apply_all_verl_patches"
     return runtime_env

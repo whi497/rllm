@@ -16,9 +16,24 @@ from dataclasses import dataclass, field
 
 import pytest
 
+from rllm.harnesses.aider import AiderHarness
+from rllm.harnesses.claude_code import ClaudeCodeHarness
+from rllm.harnesses.codex import CodexHarness
+from rllm.harnesses.kimi_cli import KimiCliHarness
 from rllm.harnesses.mini_swe_agent import MiniSweAgentHarness
 from rllm.harnesses.opencode import OpenCodeHarness
+from rllm.harnesses.qwen_code import QwenCodeHarness
 from rllm.types import AgentConfig, Task
+
+ALL_HARNESSES = [
+    AiderHarness,
+    ClaudeCodeHarness,
+    CodexHarness,
+    KimiCliHarness,
+    MiniSweAgentHarness,
+    OpenCodeHarness,
+    QwenCodeHarness,
+]
 
 
 @dataclass
@@ -63,19 +78,8 @@ def _make_config(base_url: str = "http://gw:8000/sessions/eval-0/v1", model: str
 
 # ---------------------------------------------------------------------------
 # Lifecycle: install on sandbox-ready, run() returns None and execs the CLI
+# (BaseCliHarness.run is shared by every subclass — tested once here)
 # ---------------------------------------------------------------------------
-
-
-def test_on_sandbox_ready_runs_install_script_as_root():
-    h = OpenCodeHarness()
-    sandbox = FakeSandbox()
-    h.set_sandbox(sandbox)
-    h.on_sandbox_ready({}, _make_config())
-
-    assert len(sandbox.calls) == 1
-    call = sandbox.calls[0]
-    assert call.user == "root"
-    assert "opencode-ai" in call.command
 
 
 def test_run_returns_none_so_gateway_drives_trajectory():
@@ -83,9 +87,8 @@ def test_run_returns_none_so_gateway_drives_trajectory():
     the engine's enrichment pass populates Steps from those traces."""
     h = OpenCodeHarness()
     sandbox = FakeSandbox(stdout="opencode said hi")
-    h.set_sandbox(sandbox)
 
-    result = h.run(_make_task(), _make_config())
+    result = h.run(_make_task(), _make_config(), env=sandbox)
 
     assert result is None
 
@@ -97,9 +100,8 @@ def test_run_execs_cli_against_agent_user_with_env_exported():
     be set for ``cd`` and lost before the CLI runs."""
     h = OpenCodeHarness()
     sandbox = FakeSandbox()
-    h.set_sandbox(sandbox)
 
-    h.run(_make_task(), _make_config())
+    h.run(_make_task(), _make_config(), env=sandbox)
 
     # Last call is the CLI invocation; preceding calls are write_configs.
     invocation = sandbox.calls[-1]
@@ -114,34 +116,46 @@ def test_run_swallows_cli_failure_and_returns_none():
     the point of failure) plus the verifier still drive the reward."""
     h = OpenCodeHarness()
     sandbox = FakeSandbox(fail_on_substring="opencode --model")
-    h.set_sandbox(sandbox)
 
-    result = h.run(_make_task(), _make_config())
+    result = h.run(_make_task(), _make_config(), env=sandbox)
 
     assert result is None
 
 
-def test_invocation_omits_cd_when_no_workdir_in_metadata():
-    """No explicit workdir → don't override the Dockerfile's WORKDIR.
-
-    Hardcoding ``cd /workspace`` was breaking tasks (like harbor's
-    hello-world, WORKDIR=/app) because the agent created files in
-    /workspace but the verifier checked /app.
-    """
+@pytest.mark.parametrize(
+    ("workdir", "expected_prefix"),
+    [
+        # No explicit workdir → don't override the Dockerfile's WORKDIR.
+        # Hardcoding ``cd /workspace`` was breaking tasks (like harbor's
+        # hello-world, WORKDIR=/app) because the agent created files in
+        # /workspace but the verifier checked /app.
+        (None, None),
+        # shlex.quote leaves simple paths unquoted; quotes only kick in
+        # for shell metachars.
+        ("/app", "cd /app && "),
+        ("/work space", "cd '/work space' && "),
+    ],
+)
+def test_invocation_cd_prefix_follows_task_workdir(workdir: str | None, expected_prefix: str | None):
     h = OpenCodeHarness()
-    cmd = h.build_invocation("hi", _make_task(), _make_config())
-    assert not cmd.startswith("cd ")
-    # Allow ". $HOME/.nvm/nvm.sh" but not a leading directory change.
-    assert "cd '/" not in cmd and not cmd.startswith("cd /")
+    cmd = h.build_invocation("hi", _make_task(workdir=workdir), _make_config())
+    if expected_prefix is None:
+        assert not cmd.startswith("cd ")
+        # Allow ". $HOME/.nvm/nvm.sh" but not a leading directory change.
+        assert "cd '/" not in cmd and not cmd.startswith("cd /")
+    else:
+        assert cmd.startswith(expected_prefix)
 
 
-def test_invocation_includes_cd_when_workdir_set():
-    h = OpenCodeHarness()
-    cmd = h.build_invocation("hi", _make_task(workdir="/app"), _make_config())
-    # shlex.quote leaves simple paths unquoted; quotes only kick in for shell metachars.
-    assert cmd.startswith("cd /app && ")
-    cmd_with_space = h.build_invocation("hi", _make_task(workdir="/work space"), _make_config())
-    assert cmd_with_space.startswith("cd '/work space' && ")
+@pytest.mark.parametrize("harness_cls", ALL_HARNESSES)
+def test_install_script_is_nonempty_and_idempotent(harness_cls):
+    """Every harness ships an install script that no-ops when the CLI is
+    already present (``command -v`` guard) — re-running install on a warm
+    sandbox must not reinstall or fail."""
+    script = harness_cls().install_script()
+    assert isinstance(script, str)
+    assert script.strip()
+    assert "command -v" in script
 
 
 # ---------------------------------------------------------------------------
@@ -159,54 +173,52 @@ def test_heredoc_write_rejects_paths_with_shell_variables():
         BaseCliHarness._heredoc_write("$HOME/.config/foo.json", "{}")
 
 
-def test_opencode_writes_config_via_unquoted_path_so_home_expands():
-    """opencode's config file goes under $HOME/.config/opencode/opencode.json,
-    so the write command must leave $HOME *unquoted* in the shell. Otherwise
-    the file lands in a literal ``$HOME`` dir under cwd and opencode never
-    finds it."""
-    h = OpenCodeHarness()
-    sandbox = FakeSandbox()
-    h.set_sandbox(sandbox)
-    config = _make_config(model="gpt-5.4-mini")
-    env = h.build_env(_make_task(), config)
-
-    h.write_configs(_make_task(), config, env)
-
-    write_cmd = sandbox.calls[-1].command
-    # $HOME left unquoted so the shell expands it at exec time.
-    assert "mkdir -p $HOME/.config/opencode" in write_cmd
-    assert "cat > $HOME/.config/opencode/opencode.json" in write_cmd
-    # Defensive: path must not be single-quoted around $HOME.
-    assert "'$HOME" not in write_cmd
-
-
 def test_opencode_writes_config_with_custom_provider_to_bypass_models_dev():
     """opencode validates known-provider model ids against its bundled models.dev
     registry — ``gpt-5.4-mini`` (or any ``rllm setup`` custom name) raises
     ProviderModelNotFoundError under provider="openai". The harness must
     register the gateway as a custom provider via npm:@ai-sdk/openai-compatible
-    so arbitrary model ids work."""
+    so arbitrary model ids work. Also covers the $HOME-expansion and
+    gateway-token plumbing of the same config write."""
     h = OpenCodeHarness()
     sandbox = FakeSandbox()
-    h.set_sandbox(sandbox)
-    config = _make_config(base_url="http://gw:8000/sessions/eval-0/v1", model="openai/gpt-4o")
+    config = AgentConfig(
+        base_url="http://gw:8000/sessions/eval-0/v1",
+        model="openai/gpt-4o",
+        session_uid="eval-0",
+        metadata={"gateway_auth_token": "tok-xyz"},
+    )
     env = h.build_env(_make_task(), config)
 
-    h.write_configs(_make_task(), config, env)
+    h.write_configs(sandbox, _make_task(), config, env)
 
     written = sandbox.calls[-1].command
     assert sandbox.calls[-1].user is None  # written as agent user
     assert "opencode.json" in written
+    # The config lives under $HOME/.config/opencode — $HOME must stay
+    # *unquoted* so the shell expands it at exec time; single-quoting it
+    # lands the file in a literal ``$HOME`` dir under cwd and opencode
+    # never finds it.
+    assert "mkdir -p $HOME/.config/opencode" in written
+    assert "cat > $HOME/.config/opencode/opencode.json" in written
+    assert "'$HOME" not in written
     # Custom provider id, not the inferred "openai" — that's the whole point.
     assert '"rllm-gateway"' in written
+    # The bare model id is registered under the custom provider — the
+    # inferred upstream provider is only used for env-var key selection.
+    assert '"gpt-4o"' in written
     # npm package marks it as a generic OpenAI-shaped endpoint.
     assert '"npm": "@ai-sdk/openai-compatible"' in written
     # baseURL nested under provider.<name>.options.
     assert '"baseURL": "http://gw:8000/sessions/eval-0/v1"' in written
+    # Gateway bearer token from config.metadata flows into apiKey.
+    assert '"apiKey": "tok-xyz"' in written
 
 
-def test_opencode_invocation_uses_custom_provider_prefix():
-    """--model flag must carry the custom provider id, not the inferred openai/anthropic."""
+def test_opencode_invocation_uses_custom_provider_prefix_and_detaches_stdin():
+    """--model must carry the custom provider id, not the inferred
+    openai/anthropic. And opencode blocks on its initial stdin read on
+    Modal sandboxes — the invocation must redirect stdin from /dev/null."""
     h = OpenCodeHarness()
     cmd = h.build_invocation(
         instruction="hi",
@@ -214,13 +226,6 @@ def test_opencode_invocation_uses_custom_provider_prefix():
         config=_make_config(model="gpt-5.4-mini"),
     )
     assert "--model=rllm-gateway/gpt-5.4-mini" in cmd
-
-
-def test_opencode_invocation_detaches_stdin():
-    """opencode blocks on its initial stdin read on Modal sandboxes — the
-    invocation must redirect stdin from /dev/null."""
-    h = OpenCodeHarness()
-    cmd = h.build_invocation("hi", _make_task(), _make_config())
     assert "</dev/null" in cmd
 
 
@@ -249,20 +254,21 @@ def test_provider_inference(bare_model: str, expected_provider: str, expected_qu
     assert qualified == expected_qualified
 
 
-def test_opencode_writes_provider_config_with_model_id_only():
-    """opencode.json registers the bare model id under the custom provider —
-    the inferred upstream provider (openai/anthropic) is informational and
-    used for env-var key selection, not for opencode routing."""
-    h = OpenCodeHarness()
-    sandbox = FakeSandbox()
-    h.set_sandbox(sandbox)
-    config = _make_config(model="claude-opus-4-1")  # bare anthropic name
-    env = h.build_env(_make_task(), config)
-    h.write_configs(_make_task(), config, env)
+# ---------------------------------------------------------------------------
+# Cross-harness: ANTHROPIC_BASE_URL must not end in /v1
+# ---------------------------------------------------------------------------
 
-    written = sandbox.calls[-1].command
-    assert '"rllm-gateway"' in written
-    assert '"claude-opus-4-1"' in written  # model id registered under rllm-gateway
+
+@pytest.mark.parametrize("harness_cls", [MiniSweAgentHarness, ClaudeCodeHarness, AiderHarness, OpenCodeHarness])
+def test_anthropic_base_url_strips_v1_suffix(harness_cls):
+    """Anthropic clients (SDK / litellm) append ``/v1/messages`` themselves,
+    so ``ANTHROPIC_BASE_URL`` must NOT end in ``/v1`` or requests double up
+    to ``/v1/v1/messages`` and Anthropic 404s. OpenAI-style vars keep the
+    ``/v1`` suffix — only the Anthropic route doubles it."""
+    env = harness_cls().build_env(_make_task(), _make_config(base_url="http://gw:8000/sessions/eval-0/v1"))
+    assert env["ANTHROPIC_BASE_URL"] == "http://gw:8000/sessions/eval-0"
+    if "OPENAI_BASE_URL" in env:
+        assert env["OPENAI_BASE_URL"] == "http://gw:8000/sessions/eval-0/v1"
 
 
 # ---------------------------------------------------------------------------
@@ -290,26 +296,15 @@ def test_mini_swe_agent_provider_key_var(model: str, expected_var: str):
     assert expected_var in env
 
 
-def test_mini_swe_agent_anthropic_base_url_strips_v1():
-    """Anthropic's litellm client appends ``/v1/messages`` itself, so
-    ``ANTHROPIC_BASE_URL`` must NOT end in ``/v1`` or requests double up
-    to ``/v1/v1/messages`` and Anthropic 404s."""
-    h = MiniSweAgentHarness()
-    env = h.build_env(_make_task(), _make_config(base_url="http://gw:8000/sessions/eval-0/v1"))
-    assert env["ANTHROPIC_BASE_URL"] == "http://gw:8000/sessions/eval-0"
-    assert env["OPENAI_BASE_URL"] == "http://gw:8000/sessions/eval-0/v1"
-
-
 def test_mini_swe_agent_writes_dotenv_at_home_path():
     """v2 reads the dotenv on startup; the base URL must be in the file
     (not just env) because v2 loads dotenv with override=True."""
     h = MiniSweAgentHarness()
     sandbox = FakeSandbox()
-    h.set_sandbox(sandbox)
     config = _make_config(base_url="http://gw:8000/sessions/eval-0/v1", model="claude-opus-4-1")
     env = h.build_env(_make_task(), config)
 
-    h.write_configs(_make_task(), config, env)
+    h.write_configs(sandbox, _make_task(), config, env)
 
     written = sandbox.calls[-1].command
     assert "$HOME/.config/mini-swe-agent/.env" in written
@@ -327,23 +322,235 @@ def test_mini_swe_agent_invocation_uses_qualified_model():
 
 
 # ---------------------------------------------------------------------------
-# Container URL rewrite (docker → host.docker.internal)
+# ClaudeCodeHarness — bypassPermissions sandbox mode
 # ---------------------------------------------------------------------------
 
 
-def test_container_url_rewrites_loopback_for_docker_backend():
-    h = OpenCodeHarness()
-    h.sandbox_backend = "docker"
-    assert h._container_url("http://127.0.0.1:8000/v1") == "http://host.docker.internal:8000/v1"
-    assert h._container_url("http://localhost:9001/sessions/x/v1") == "http://host.docker.internal:9001/sessions/x/v1"
+def test_claude_code_build_env_configures_unattended_sandbox_run():
+    """One build_env call must establish the whole unattended contract:
+
+    - ``IS_SANDBOX=1``: ``--permission-mode=bypassPermissions`` is a no-op
+      without it — the CLI ignores the flag and exits silently on the first
+      filesystem tool call (the original 'ran but no traces' symptom).
+    - ``CLAUDE_CONFIG_DIR``: keeps debug logs / project sessions / statsig
+      writes out of ``$HOME/.claude`` so concurrent runs don't stomp each
+      other and read-only $HOME images don't fail.
+    - ``ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU}_MODEL`` + subagent alias:
+      sub-agent dispatch and resumed-session continuations use these
+      internal aliases; when the gateway routes to a non-Anthropic id they
+      must point at the chosen model or sub-agents try to call
+      api.anthropic.com directly and 404 against the bare model id.
+    """
+    h = ClaudeCodeHarness()
+    env = h.build_env(_make_task(), _make_config(model="gpt-4o"))
+    assert env["IS_SANDBOX"] == "1"
+    assert env["CLAUDE_CONFIG_DIR"].startswith("/")
+    for k in (
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "CLAUDE_CODE_SUBAGENT_MODEL",
+    ):
+        assert env[k] == "gpt-4o"
 
 
-def test_container_url_passthrough_for_non_docker_backends():
-    h = OpenCodeHarness()
-    h.sandbox_backend = "modal"
-    assert h._container_url("http://127.0.0.1:8000/v1") == "http://127.0.0.1:8000/v1"
-    h.sandbox_backend = "local"
-    assert h._container_url("http://localhost:9000/v1") == "http://localhost:9000/v1"
+def test_claude_code_invocation_uses_print_bypass_permissions_and_local_bin_path():
+    """Replaces the old ``--bare -p ... --permission-mode acceptEdits``
+    shape: ``--bare`` no longer exists in recent CLI versions, and
+    ``acceptEdits`` still prompts on shell tool calls. ``--print``
+    is the non-interactive entrypoint; ``bypassPermissions`` (gated by
+    ``IS_SANDBOX=1`` from build_env) is the unattended-eval contract.
+    The official installer places ``claude`` at ``$HOME/.local/bin``,
+    which isn't always on the agent shell's default PATH — the
+    invocation must export it before running the binary."""
+    h = ClaudeCodeHarness()
+    cmd = h.build_invocation("fix the bug", _make_task(), _make_config(model="claude-opus-4-1"))
+    assert "claude --verbose" in cmd
+    assert "--output-format=stream-json" in cmd
+    assert "--permission-mode=bypassPermissions" in cmd
+    assert "--print" in cmd
+    # ``--`` separator so prompts starting with ``-`` aren't reparsed as flags.
+    assert "-- 'fix the bug'" in cmd
+    # Old ``--bare`` flag is gone in current CLI versions.
+    assert "--bare" not in cmd
+    assert '"$HOME/.local/bin:$PATH"' in cmd
+
+
+# ---------------------------------------------------------------------------
+# CodexHarness — custom-provider config + non-interactive exec
+# ---------------------------------------------------------------------------
+
+
+def test_codex_build_env_sets_codex_home_and_credentials():
+    """Codex reads auth from ``$CODEX_HOME/auth.json`` and the gateway
+    URL from ``$CODEX_HOME/config.toml``. The env must point CODEX_HOME
+    at our writable dir and keep OPENAI_API_KEY in sync with auth.json."""
+    h = CodexHarness()
+    env = h.build_env(_make_task(), _make_config(model="gpt-5"))
+    assert env["CODEX_HOME"] == "/tmp/codex-home"
+    assert env["OPENAI_API_KEY"]
+    assert env["OPENAI_BASE_URL"] == "http://gw:8000/sessions/eval-0/v1"
+
+
+def test_codex_writes_auth_json_and_config_toml():
+    """Codex 0.118+ requires BOTH:
+      - ``$CODEX_HOME/auth.json`` with ``{"OPENAI_API_KEY": "..."}``
+        (env var alone is not picked up by ``codex exec``)
+      - ``$CODEX_HOME/config.toml`` with ``openai_base_url = "..."``
+        (the env var is ignored by recent versions)
+    The earlier custom ``model_provider`` block was a silent no-op."""
+    h = CodexHarness()
+    sandbox = FakeSandbox()
+    config = _make_config(base_url="http://gw:8000/sessions/eval-0/v1", model="gpt-5")
+    env = h.build_env(_make_task(), config)
+
+    h.write_configs(sandbox, _make_task(), config, env)
+
+    written = sandbox.calls[-1].command
+    assert sandbox.calls[-1].user is None  # written as agent user
+    # $CODEX_HOME left unquoted so the shell expands it at exec time.
+    assert 'mkdir -p "$CODEX_HOME"' in written
+    assert 'cat > "$CODEX_HOME/auth.json"' in written
+    assert 'cat > "$CODEX_HOME/config.toml"' in written
+    # auth.json schema: JSON with OPENAI_API_KEY at top level.
+    assert '"OPENAI_API_KEY"' in written
+    # config.toml schema: just openai_base_url — no custom-provider blocks.
+    assert 'openai_base_url = "http://gw:8000/sessions/eval-0/v1"' in written
+    # Custom-provider keys must NOT appear — they're a silent no-op and
+    # caused the original "codex runs, no traces captured" symptom.
+    assert "model_provider" not in written
+    assert "model_providers" not in written
+
+
+def test_codex_invocation_uses_exec_with_bypass_flags_and_bare_model_id():
+    """``codex exec`` is the non-interactive entrypoint. The bypass flag
+    skips Codex's inner approval gates and seatbelt (we're already inside
+    the rLLM sandbox). ``--json --enable unified_exec`` are required for
+    non-interactive runs against the new exec engine. The ``--`` separator
+    is load-bearing — without it Codex tries to parse the instruction as
+    flags when it begins with ``-``. And ``rllm setup`` may give bare or
+    pre-qualified names; the ``--model`` flag expects the bare id (no
+    ``provider/`` prefix)."""
+    h = CodexHarness()
+    cmd = h.build_invocation("fix the bug", _make_task(), _make_config(model="openai/gpt-5"))
+    assert "codex exec" in cmd
+    assert "--dangerously-bypass-approvals-and-sandbox" in cmd
+    assert "--skip-git-repo-check" in cmd
+    assert "--model gpt-5" in cmd
+    assert "openai/gpt-5" not in cmd
+    assert "--json" in cmd
+    assert "--enable unified_exec" in cmd
+    assert "-- 'fix the bug'" in cmd
+    assert "</dev/null" in cmd
+
+
+# ---------------------------------------------------------------------------
+# QwenCodeHarness — env-only routing, --yolo for unattended runs
+# ---------------------------------------------------------------------------
+
+
+def test_qwen_code_build_env_routes_through_openai_compat_vars():
+    """Qwen Code is a gemini-cli fork that natively reads
+    OPENAI_BASE_URL/OPENAI_API_KEY/OPENAI_MODEL — so unlike Codex it
+    needs no config file, just env vars."""
+    h = QwenCodeHarness()
+    env = h.build_env(_make_task(), _make_config(model="qwen3-coder-plus"))
+    assert env["OPENAI_API_KEY"]
+    assert env["OPENAI_BASE_URL"] == "http://gw:8000/sessions/eval-0/v1"
+    # OPENAI_MODEL carries the bare model id, not a provider-prefixed name.
+    assert env["OPENAI_MODEL"] == "qwen3-coder-plus"
+
+
+def test_qwen_code_invocation_uses_prompt_flag_with_yolo():
+    """``-p`` is the non-interactive prompt flag (gemini-cli inheritance).
+    ``--yolo`` auto-approves tool calls so the run finishes unattended."""
+    h = QwenCodeHarness()
+    cmd = h.build_invocation("fix the bug", _make_task(), _make_config(model="qwen3-coder-plus"))
+    assert "qwen --yolo" in cmd
+    assert "--model qwen3-coder-plus" in cmd
+    assert " -p 'fix the bug'" in cmd
+    assert "</dev/null" in cmd
+
+
+# ---------------------------------------------------------------------------
+# AiderHarness — litellm-backed, --yes for unattended
+# ---------------------------------------------------------------------------
+
+
+def test_aider_build_env_routes_via_openai_base_url_vars():
+    """aider uses litellm under the hood — both OPENAI_API_BASE and
+    OPENAI_BASE_URL are honored across litellm versions (Anthropic
+    routing is covered by the cross-harness strip-/v1 test above)."""
+    h = AiderHarness()
+    env = h.build_env(_make_task(), _make_config(base_url="http://gw:8000/sessions/eval-0/v1", model="openai/gpt-4o"))
+    assert env["OPENAI_API_BASE"] == "http://gw:8000/sessions/eval-0/v1"
+    assert env["OPENAI_BASE_URL"] == "http://gw:8000/sessions/eval-0/v1"
+
+
+def test_aider_invocation_uses_yes_no_stream_no_git():
+    """``--yes`` auto-confirms diffs/shell prompts (mandatory for
+    unattended). ``--no-stream`` so the gateway sees one response per
+    turn rather than a chunk-per-token stream. ``--no-git`` because
+    Harbor task workdirs aren't always git repos and aider would
+    refuse to start."""
+    h = AiderHarness()
+    cmd = h.build_invocation("fix it", _make_task(), _make_config(model="gpt-4o"))
+    assert "aider --yes --no-stream --no-git" in cmd
+    assert "--model=openai/gpt-4o" in cmd
+    assert "--message='fix it'" in cmd
+
+
+# ---------------------------------------------------------------------------
+# KimiCliHarness — JSON-RPC wire protocol, config-file routing
+# ---------------------------------------------------------------------------
+
+
+def test_kimi_cli_writes_config_with_custom_provider_block():
+    """kimi reads provider+model routing from a JSON config; the harness
+    registers the rLLM gateway as a custom ``openai_legacy`` provider
+    (kimi's name for any plain /v1/chat/completions endpoint) and points
+    the chosen model at it."""
+    h = KimiCliHarness()
+    sandbox = FakeSandbox()
+    config = _make_config(base_url="http://gw:8000/sessions/eval-0/v1", model="gpt-4o")
+    env = h.build_env(_make_task(), config)
+    h.write_configs(sandbox, _make_task(), config, env)
+    written = sandbox.calls[-1].command
+    assert "/tmp/kimi-config.json" in written
+    assert '"rllm-gateway"' in written
+    # type=openai_legacy is the wire-compatible setting for plain
+    # /v1/chat/completions backends (which is what the gateway exposes).
+    assert '"type": "openai_legacy"' in written
+    assert '"base_url": "http://gw:8000/sessions/eval-0/v1"' in written
+
+
+def test_kimi_cli_invocation_pipes_jsonrpc_prompt_and_breaks_loop_on_response_id():
+    """kimi reads the prompt from stdin as a JSON-RPC ``prompt`` method,
+    not from argv. The field name is ``user_input`` (NOT ``text`` — the
+    old field is silently dropped). ``--yolo`` auto-approves tool calls;
+    ``--wire`` enables the JSON-RPC protocol.
+
+    kimi also doesn't exit on EOF — the while-read loop watches stdout
+    for the response with ``"id":"1"``, ``kill 0``s the process group
+    (sleep + kimi + loop). ``trap 'exit 0' TERM`` converts the SIGTERM
+    that ``kill 0`` raises into a clean exit so the engine doesn't see
+    a 143 and treat the run as failed."""
+    h = KimiCliHarness()
+    cmd = h.build_invocation("hi", _make_task(), _make_config(model="gpt-4o"))
+    assert '"jsonrpc": "2.0"' in cmd
+    assert '"method": "prompt"' in cmd
+    assert '"user_input": "hi"' in cmd
+    # id is a string, not an int — kimi's wire parser expects "1".
+    assert '"id": "1"' in cmd
+    assert "--wire" in cmd
+    assert "--yolo" in cmd
+    assert "--config-file /tmp/kimi-config.json" in cmd
+    assert "sleep 86400" in cmd
+    assert "while IFS= read -r line" in cmd
+    assert '*\'"id":"1"\'*' in cmd
+    assert "kill 0" in cmd
+    # SIGTERM → exit 0 so docker exec / engine see success.
+    assert "trap 'exit 0' TERM" in cmd
 
 
 # ---------------------------------------------------------------------------
@@ -351,48 +558,24 @@ def test_container_url_passthrough_for_non_docker_backends():
 # ---------------------------------------------------------------------------
 
 
-def test_gateway_api_key_uses_metadata_token_when_present():
-    config = AgentConfig(
-        base_url="http://gw/v1",
-        model="gpt-4o",
-        session_uid="eval-0",
-        metadata={"gateway_auth_token": "tok-abc"},
-    )
+@pytest.mark.parametrize(
+    ("metadata", "env_value", "expected"),
+    [
+        # metadata token wins even when the env var is set.
+        ({"gateway_auth_token": "tok-abc"}, "sk-real-user-key", "tok-abc"),
+        # No metadata → fall back to the env var.
+        ({}, "sk-real-user-key", "sk-real-user-key"),
+        # Neither → placeholder so the CLI still starts.
+        ({}, None, "sk-rllm-gateway"),
+    ],
+)
+def test_gateway_api_key_resolution(monkeypatch, metadata: dict, env_value: str | None, expected: str):
     from rllm.harnesses.cli_harness import BaseCliHarness
 
-    assert BaseCliHarness.gateway_api_key(config, "OPENAI_API_KEY") == "tok-abc"
+    if env_value is None:
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    else:
+        monkeypatch.setenv("OPENAI_API_KEY", env_value)
+    config = AgentConfig(base_url="http://gw/v1", model="gpt-4o", session_uid="eval-0", metadata=metadata)
 
-
-def test_gateway_api_key_falls_back_to_env_var(monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-real-user-key")
-    config = AgentConfig(base_url="http://gw/v1", model="gpt-4o", session_uid="eval-0")
-
-    from rllm.harnesses.cli_harness import BaseCliHarness
-
-    assert BaseCliHarness.gateway_api_key(config, "OPENAI_API_KEY") == "sk-real-user-key"
-
-
-def test_gateway_api_key_returns_placeholder_when_env_unset(monkeypatch):
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    config = AgentConfig(base_url="http://gw/v1", model="gpt-4o", session_uid="eval-0")
-
-    from rllm.harnesses.cli_harness import BaseCliHarness
-
-    assert BaseCliHarness.gateway_api_key(config, "OPENAI_API_KEY") == "sk-rllm-gateway"
-
-
-def test_opencode_uses_gateway_token_in_config_when_metadata_set():
-    h = OpenCodeHarness()
-    sandbox = FakeSandbox()
-    h.set_sandbox(sandbox)
-    config = AgentConfig(
-        base_url="http://gw/sessions/eval-0/v1",
-        model="gpt-4o",
-        session_uid="eval-0",
-        metadata={"gateway_auth_token": "tok-xyz"},
-    )
-    env = h.build_env(_make_task(), config)
-    h.write_configs(_make_task(), config, env)
-
-    written = sandbox.calls[-1].command
-    assert '"apiKey": "tok-xyz"' in written
+    assert BaseCliHarness.gateway_api_key(config, "OPENAI_API_KEY") == expected

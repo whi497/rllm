@@ -5,8 +5,8 @@ import logging
 import tinker
 import torch
 
-from rllm.experimental.common.visualization import print_metrics_table  # noqa: F401 (re-export)
-from rllm.experimental.unified_trainer import TrainerState
+from rllm.trainer.algorithms.visualization import print_metrics_table  # noqa: F401 (re-export)
+from rllm.trainer.unified_trainer import TrainerState
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,7 @@ def compute_kl_and_entropy_metrics(training_datums: list[tinker.Datum], training
         training_logprobs_actions = training_logprobs_tensor[action_mask]
 
         if len(sampling_logprobs_actions) > 0:
-            logprob_diff = sampling_logprobs_actions - training_logprobs_actions
+            logprob_diff = (sampling_logprobs_actions - training_logprobs_actions).abs()
             all_diffs.append(logprob_diff)
             all_sampling_logprobs.append(sampling_logprobs_actions)
 

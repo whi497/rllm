@@ -2,7 +2,7 @@
 
 from rllm_model_gateway.models import TraceRecord
 
-from rllm.experimental.engine.trace_converter import (
+from rllm.engine.trace_converter import (
     _parse_openai_tool_calls,
     trace_record_to_step,
 )
@@ -111,6 +111,16 @@ class TestTraceRecordToStep:
         assert step.model_output.completion_ids == [10, 11]
         assert step.model_output.logprobs == [-0.5, -0.3]
         assert step.model_output.tool_calls is None
+
+    def test_weight_version_propagated(self):
+        trace = self._make_trace(weight_version=7)
+        step = trace_record_to_step(trace)
+        assert step.weight_version == 7
+        assert step.model_output.weight_version == 7
+
+    def test_weight_version_defaults_none(self):
+        step = trace_record_to_step(self._make_trace())
+        assert step.weight_version is None
 
     def test_step_with_tool_calls(self):
         trace = self._make_trace(
