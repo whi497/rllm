@@ -31,7 +31,7 @@ except (ImportError, ValueError):
     from multi_pass import MultiPassConfig, MultiPassEvaluator, MultiPassFlow, ValidationPass
 
 from rllm.data.dataset import DatasetRegistry
-from rllm.experimental.unified_trainer import AgentTrainer
+from rllm.trainer import AgentTrainer
 
 
 def _build_multi_pass(config: DictConfig):
@@ -61,7 +61,7 @@ def _shutdown_webshop_pool():
         pass
 
 
-@hydra.main(config_path="pkg://rllm.experimental.config", config_name="unified", version_base=None)
+@hydra.main(config_path="pkg://rllm.trainer.config", config_name="unified", version_base=None)
 def main(config: DictConfig):
     train_dataset = DatasetRegistry.load_dataset("webshop", "train")
     val_dataset = DatasetRegistry.load_dataset("webshop", "test")

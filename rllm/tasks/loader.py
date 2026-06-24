@@ -28,7 +28,10 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 compatibility.
+    import tomli as tomllib
 
 from rllm.tasks.dataset_config import DatasetConfig, load_dataset_config
 from rllm.types import Task
