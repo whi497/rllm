@@ -39,6 +39,7 @@ REWIND_FLOWS = {
     "refacted": alfworld_rewind_choice_flow,
     "undiscounted_final": alfworld_rewind_undiscounted_final_flow,
     "reflect_reward_diff": alfworld_rewind_reflect_reward_diff_flow,
+    "accumulated_reflect_diff": alfworld_rewind_accumulated_reflect_diff_flow,
     "segment_novelty_gate": alfworld_rewind_segment_novelty_gate_flow,
 }
 

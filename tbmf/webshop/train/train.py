@@ -11,6 +11,7 @@ try:
     from ..flow.webshop_flow import webshop_flow
     from ..flow.webshop_rewind_choice_flow import webshop_rewind_choice_flow
     from ..flow.webshop_rewind_reflect_reward_diff import webshop_rewind_reflect_reward_diff_flow
+    from ..flow.webshop_rewind_accumulated_reflect_diff import webshop_rewind_accumulated_reflect_diff_flow
     from ..flow.webshop_rewind_segment_novelty_gate import webshop_rewind_segment_novelty_gate_flow
     from ..flow.webshop_rewind_undiscounted_final import webshop_rewind_undiscounted_final_flow
 except (ImportError, ValueError):
@@ -19,6 +20,7 @@ except (ImportError, ValueError):
     from flow.webshop_flow import webshop_flow
     from flow.webshop_rewind_choice_flow import webshop_rewind_choice_flow
     from flow.webshop_rewind_reflect_reward_diff import webshop_rewind_reflect_reward_diff_flow
+    from flow.webshop_rewind_accumulated_reflect_diff import webshop_rewind_accumulated_reflect_diff_flow
     from flow.webshop_rewind_segment_novelty_gate import webshop_rewind_segment_novelty_gate_flow
     from flow.webshop_rewind_undiscounted_final import webshop_rewind_undiscounted_final_flow
 
@@ -37,6 +39,7 @@ REWIND_FLOWS = {
     "refacted": webshop_rewind_choice_flow,
     "undiscounted_final": webshop_rewind_undiscounted_final_flow,
     "reflect_reward_diff": webshop_rewind_reflect_reward_diff_flow,
+    "accumulated_reflect_diff": webshop_rewind_accumulated_reflect_diff_flow,
     "segment_novelty_gate": webshop_rewind_segment_novelty_gate_flow,
 }
 
