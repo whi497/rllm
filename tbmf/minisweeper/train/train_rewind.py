@@ -14,10 +14,12 @@ from omegaconf import DictConfig
 
 try:
     from ..eval.minisweeper_eval import minisweeper_evaluator
+    from ..eval.minisweeper_rewind_eval import minisweeper_rewind_evaluator
     from ..flow.minisweeper_flow import minisweeper_flow
     from ..flow.minisweeper_rewind_flow import minisweeper_rewind_flow
 except (ImportError, ValueError):
     from eval.minisweeper_eval import minisweeper_evaluator
+    from eval.minisweeper_rewind_eval import minisweeper_rewind_evaluator
     from flow.minisweeper_flow import minisweeper_flow
     from flow.minisweeper_rewind_flow import minisweeper_rewind_flow
 
@@ -37,10 +39,10 @@ def _build_multi_pass(config: DictConfig):
 
     mp_config = MultiPassConfig(
         train_flow=minisweeper_rewind_flow,
-        train_evaluator=minisweeper_evaluator,
+        train_evaluator=minisweeper_rewind_evaluator,
         val_passes=[
             ValidationPass("single_episode", minisweeper_flow, minisweeper_evaluator, enabled=single_ep_enabled),
-            ValidationPass("rewind", minisweeper_rewind_flow, minisweeper_evaluator, enabled=rewind_enabled, sample_budget=1),
+            ValidationPass("rewind", minisweeper_rewind_flow, minisweeper_rewind_evaluator, enabled=rewind_enabled, sample_budget=1),
         ],
     )
     return MultiPassFlow(mp_config), MultiPassEvaluator(mp_config)

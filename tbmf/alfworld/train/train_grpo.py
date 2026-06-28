@@ -15,8 +15,13 @@ from omegaconf import DictConfig
 try:
     from ..eval.alfworld_eval import alfworld_evaluator
     from ..eval.alfworld_lamer_eval import alfworld_lamer_evaluator
+    from ..eval.alfworld_rewind_eval import alfworld_rewind_evaluator
     from ..flow.alfworld_flow import alfworld_flow
     from ..flow.alfworld_lamer_flow import alfworld_lamer_flow
+    from ..flow.alfworld_rewind_choice_flow import alfworld_rewind_choice_flow
+    from ..flow.alfworld_rewind_reflect_reward_diff import alfworld_rewind_reflect_reward_diff_flow
+    from ..flow.alfworld_rewind_segment_novelty_gate import alfworld_rewind_segment_novelty_gate_flow
+    from ..flow.alfworld_rewind_undiscounted_final import alfworld_rewind_undiscounted_final_flow
 except (ImportError, ValueError):
     from eval.alfworld_eval import alfworld_evaluator
     from eval.alfworld_lamer_eval import alfworld_lamer_evaluator
@@ -35,14 +40,14 @@ from rllm.experimental.unified_trainer import AgentTrainer
 def _build_multi_pass(config: DictConfig):
     val_cfg = config.get("rllm", {}).get("validation", {}).get("passes", {})
     single_ep_enabled = val_cfg.get("single_episode", {}).get("enabled", True)
-    multi_ep_enabled = val_cfg.get("multi_episode", {}).get("enabled", True)
+    multi_ep_enabled = val_cfg.get("rewind", {}).get("enabled", True)
 
     mp_config = MultiPassConfig(
         train_flow=alfworld_flow,
         train_evaluator=alfworld_evaluator,
         val_passes=[
             ValidationPass("single_episode", alfworld_flow, alfworld_evaluator, enabled=single_ep_enabled),
-            ValidationPass("multi_episode", alfworld_lamer_flow, alfworld_lamer_evaluator, enabled=multi_ep_enabled, sample_budget=1),
+            ValidationPass("rewind", alfworld_rewind_reflect_reward_diff_flow, alfworld_rewind_evaluator, enabled=multi_ep_enabled, sample_budget=1),
         ],
     )
     return MultiPassFlow(mp_config), MultiPassEvaluator(mp_config)

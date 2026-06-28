@@ -41,9 +41,10 @@ import textwrap
 # --- Make the package importable whether run as a module or a script ---
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _MINISWEEPER_DIR = os.path.dirname(_THIS_DIR)          # .../tbmf/minisweeper
+_FLOW_DIR = os.path.join(_MINISWEEPER_DIR, "flow")     # .../tbmf/minisweeper/flow
 _TBMF_DIR = os.path.dirname(_MINISWEEPER_DIR)          # .../tbmf
 _RLLM_ROOT = os.path.dirname(_TBMF_DIR)                # .../rllm
-for p in (_MINISWEEPER_DIR, _RLLM_ROOT):
+for p in (_MINISWEEPER_DIR, _FLOW_DIR, _RLLM_ROOT):
     if p not in sys.path:
         sys.path.insert(0, p)
 
@@ -52,7 +53,26 @@ from rllm.types import AgentConfig, Task
 
 # Import the flow MODULE (not just the function) so we can monkeypatch the
 # symbols it looks up at runtime: AsyncOpenAI and create_env_session.
-from flow import minisweeper_rewind_flow_v1 as flow_mod
+# Override via DEBUG_FLOW_MODULE, e.g.
+#   DEBUG_FLOW_MODULE=minisweeper_rewind_choice_flow_refacted
+import importlib
+
+_FLOW_MODULE_NAME = os.environ.get("DEBUG_FLOW_MODULE", "minisweeper_rewind_flow_v1")
+# _MINISWEEPER_DIR is on sys.path, so the flow modules are importable by bare
+# name (e.g. "minisweeper_rewind_choice_flow_refacted") without going through
+# the flow package __init__, which would eagerly import unrelated siblings.
+flow_mod = importlib.import_module(_FLOW_MODULE_NAME)
+
+# Resolve the rollout entrypoint by name across flow variants.
+_ROLLOUT_FN = (
+    getattr(flow_mod, "minisweeper_rewind_flow", None)
+    or getattr(flow_mod, "minisweeper_rewind_choice_flow", None)
+)
+if _ROLLOUT_FN is None:
+    raise ImportError(
+        f"{_FLOW_MODULE_NAME} exposes neither minisweeper_rewind_flow nor "
+        "minisweeper_rewind_choice_flow"
+    )
 
 
 # ----------------------------------------------------------------------------
@@ -175,7 +195,12 @@ class _DebugCompletions:
             final = flow_mod._extract_final_action_text(content)
             _section("FINAL <action> EXTRACTED", repr(final), _MAGENTA)
             if cmd.kind == "reveal":
-                parsed = f"REVEAL cell (row={cmd.row}, col={cmd.col})"
+                # v1 stores .row/.col; the rewind_choice family stores .cell=(r,c).
+                if getattr(cmd, "cell", None) is not None:
+                    row, col = cmd.cell
+                else:
+                    row, col = cmd.row, cmd.col
+                parsed = f"REVEAL cell (row={row}, col={col})"
                 color = _GREEN
             elif cmd.kind == "rewind":
                 parsed = f"REWIND to C_{cmd.rewind_to}"
@@ -395,7 +420,7 @@ async def _run(args) -> None:
         # AgentFlowFn. Calling it directly would invoke its own asyncio.run()
         # and clash with our running loop, so use .arun(), which awaits the
         # underlying coroutine in-place.
-        episode = await flow_mod.minisweeper_rewind_flow.arun(task, cfg)
+        episode = await _ROLLOUT_FN.arun(task, cfg)
     finally:
         flow_mod.AsyncOpenAI = orig_openai
         flow_mod.create_env_session = orig_create_env
@@ -418,7 +443,7 @@ def main() -> None:
     ap.add_argument("--max-tokens", type=int, default=8192)
     ap.add_argument("--step-budget", type=int, default=60,
                     help="Total environment reveal-action budget (flow step_budget). Default: 60.")
-    ap.add_argument("--segment-max-turns", type=int, default=30,
+    ap.add_argument("--segment-max-turns", type=int, default=20,
                     help="Per-segment turn limit before a forced rewind (flow segment_max_turns). Default: 30.")
     ap.add_argument("--auto", action="store_true",
                     help="Run the whole episode without pausing for <Enter> "

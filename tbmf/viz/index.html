@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>TBMF Eval Trajectory Auditor</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --line:#2a2f3a;
+    --fg:#e6e9ef; --muted:#9aa3b2; --accent:#6ea8fe; --good:#3fb950; --bad:#f85149;
+    --warn:#d29922; --mono:'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:13px/1.45 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif}
+  a{color:var(--accent);text-decoration:none}
+  h1,h2,h3{margin:0 0 .4em}
+  header{padding:10px 16px;background:var(--panel);border-bottom:1px solid var(--line);display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+  header .title{font-weight:600;font-size:15px}
+  header .meta{color:var(--muted);font-size:12px}
+  .layout{display:grid;grid-template-columns:300px 1fr;height:calc(100vh - 47px)}
+  .sidebar{border-right:1px solid var(--line);overflow:auto;background:var(--panel)}
+  .main{overflow:auto;padding:14px 18px}
+  .section-title{padding:8px 14px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;font-size:11px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--panel);z-index:2}
+  .variant{padding:6px 14px;cursor:pointer;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}
+  .variant:hover{background:var(--panel2)}
+  .variant.active{background:#23304a;border-left:3px solid var(--accent);padding-left:11px}
+  .variant .v-name{font-weight:600}
+  .variant .v-acc{font:12px var(--mono)}
+  .badge{display:inline-block;padding:1px 6px;border-radius:10px;font-size:11px;font-weight:600}
+  .badge.win{background:rgba(63,185,80,.18);color:var(--good)}
+  .badge.loss{background:rgba(248,81,73,.16);color:var(--bad)}
+  .badge.err{background:rgba(210,153,34,.18);color:var(--warn)}
+  table{border-collapse:collapse;width:100%}
+  th,td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--line);font-size:12px}
+  th{color:var(--muted);font-weight:600;position:sticky;top:0;background:var(--panel2)}
+  tr.tasktr{cursor:pointer}
+  tr.tasktr:hover{background:var(--panel2)}
+  tr.tasktr.active{background:#23304a}
+  .num{font-family:var(--mono);text-align:right}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 14px;margin-bottom:14px}
+  .dash-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .kpis{display:flex;gap:18px;flex-wrap:wrap;margin-top:6px}
+  .kpi{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;min-width:120px}
+  .kpi .k{color:var(--muted);font-size:11px}
+  .kpi .v{font:18px var(--mono);font-weight:700}
+  .bar{height:8px;background:var(--panel2);border-radius:5px;overflow:hidden;margin-top:4px}
+  .bar > span{display:block;height:100%;background:var(--accent)}
+  pre.board{font:13px/1.25 var(--mono);background:#0b0d11;border:1px solid var(--line);border-radius:6px;padding:10px;white-space:pre;overflow:auto;margin:0}
+  pre.resp{font:12px/1.5 var(--mono);background:#0b0d11;border:1px solid var(--line);border-radius:6px;padding:10px;white-space:pre-wrap;word-break:break-word;max-height:420px;overflow:auto;margin:0}
+  .steptabs{display:flex;gap:4px;flex-wrap:wrap;margin-bottom:10px}
+  .steptab{padding:3px 9px;border:1px solid var(--line);border-radius:6px;cursor:pointer;font:12px var(--mono);background:var(--panel2)}
+  .steptab:hover{border-color:var(--accent)}
+  .steptab.active{background:var(--accent);color:#06131f;border-color:var(--accent);font-weight:700}
+  .steptab.reflect{border-style:dashed}
+  .steptab.rewind{color:var(--warn)}
+  .step-grid{display:grid;grid-template-columns:minmax(220px,auto) 1fr;gap:14px;align-items:start}
+  .lbl{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.4px;margin:0 0 4px}
+  .action-pill{display:inline-block;padding:2px 8px;border-radius:6px;font:12px var(--mono);font-weight:700;background:#23304a;color:var(--accent)}
+  .action-pill.rewind{background:rgba(210,153,34,.2);color:var(--warn)}
+  .trajpick{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}
+  .trajpick .t{padding:3px 9px;border:1px solid var(--line);border-radius:6px;cursor:pointer;font:12px var(--mono);background:var(--panel2)}
+  .trajpick .t.active{background:#23304a;border-color:var(--accent)}
+  .trajpick .t.reflect{border-style:dashed;color:var(--muted)}
+  details{margin-top:8px}
+  summary{cursor:pointer;color:var(--muted)}
+  .rwitem{border-left:3px solid var(--warn);padding:6px 10px;margin:8px 0;background:var(--panel2);border-radius:0 6px 6px 0}
+  .rwitem.model{border-left-color:var(--accent)}
+  .rwitem .hd{font:12px var(--mono);font-weight:700}
+  .memtext{white-space:pre-wrap;font:12px/1.45 var(--mono);color:#c9d1d9;margin-top:6px;max-height:260px;overflow:auto}
+  .muted{color:var(--muted)}
+  .right{float:right}
+  .legend{font-size:11px;color:var(--muted)}
+  .legend code{background:var(--panel2);padding:1px 4px;border-radius:3px}
+  .flex{display:flex;gap:14px;flex-wrap:wrap;align-items:center}
+  .pathmap{font:12px var(--mono);color:var(--muted)}
+  .crumbs{font-size:12px;color:var(--muted);margin-bottom:8px}
+  .crumbs b{color:var(--fg)}
+</style>
+</head>
+<body>
+<header>
+  <span class="title">TBMF Eval Trajectory Auditor</span>
+  <span class="meta" id="hdr-meta">loading…</span>
+  <span class="meta right"><a href="#" id="show-dash">↩ dashboard</a></span>
+</header>
+<div class="layout">
+  <div class="sidebar">
+    <div class="section-title">Variants</div>
+    <div id="variant-list"></div>
+    <div class="section-title">Tasks <span id="task-count" class="muted"></span></div>
+    <div id="task-list" style="padding:0 0 30px"></div>
+  </div>
+  <div class="main" id="main"></div>
+</div>
+
+<script>
+const $ = (s,r=document)=>r.querySelector(s);
+const el = (t,attrs={},...kids)=>{const e=document.createElement(t);for(const[k,v]of Object.entries(attrs)){if(k==='class')e.className=v;else if(k==='html')e.innerHTML=v;else if(k.startsWith('on'))e.addEventListener(k.slice(2),v);else e.setAttribute(k,v);}for(const c of kids)e.append(c?.nodeType?c:document.createTextNode(c??''));return e;};
+const pct = x => (x==null?'–':(x*100).toFixed(1)+'%');
+const f2 = x => (x==null?'–':(+x).toFixed(2));
+
+let META=null, CUR_VARIANT=null, EPISODES=[], CUR_EP=null, CUR_TRAJ=0, CUR_STEP=0;
+
+async function boot(){
+  META = await (await fetch('/api/meta')).json();
+  $('#hdr-meta').textContent = `${META.model||'?'} · ${META.run_dir.split('/').slice(-2).join('/')}`;
+  renderVariantList();
+  renderDashboard();
+}
+
+function renderVariantList(){
+  const wrap=$('#variant-list'); wrap.innerHTML='';
+  for(const v of META.variants){
+    const run = META.runs[v]||{};
+    const acc = run.score;
+    const row = el('div',{class:'variant'+(v===CUR_VARIANT?' active':''),onclick:()=>selectVariant(v)},
+      el('span',{class:'v-name'},v),
+      el('span',{class:'v-acc'}, acc!=null? pct(acc):'')
+    );
+    wrap.append(row);
+  }
+}
+
+// ---------- Dashboard ----------
+function renderDashboard(){
+  CUR_VARIANT=null; renderVariantList(); $('#task-list').innerHTML=''; $('#task-count').textContent='';
+  const m=$('#main'); m.innerHTML='';
+  m.append(el('h2',{},'Dashboard'));
+  m.append(el('div',{class:'legend',html:`Model <b>${META.model||'?'}</b> · ${META.max_examples} tasks/variant · run <code>${META.run_dir}</code>`}));
+
+  // group by env
+  const byEnv={};
+  for(const [name,run] of Object.entries(META.runs)){ (byEnv[run.env]=byEnv[run.env]||[]).push([name,run]); }
+  const grid=el('div',{class:'dash-grid'});
+  for(const [env,runs] of Object.entries(byEnv)){
+    const card=el('div',{class:'panel'});
+    card.append(el('h3',{},env));
+    const tbl=el('table');
+    tbl.append(el('tr',{}, el('th',{},'flow'), el('th',{class:'num'},'win%'), el('th',{class:'num'},'solved'),
+       el('th',{class:'num'},'turns'), el('th',{class:'num'},'env_steps'), el('th',{class:'num'},'rewinds'), el('th',{class:'num'},'segments'), el('th',{class:'num'},'any@3')));
+    for(const [name,run] of runs.sort((a,b)=>a[1].variant.localeCompare(b[1].variant))){
+      const s=run.signal_averages||{};
+      const tr=el('tr',{class:'tasktr',onclick:()=>selectVariant(name)},
+        el('td',{}, el('span',{class:'v-name'},run.variant)),
+        el('td',{class:'num'}, el('b',{}, pct(run.score))),
+        el('td',{class:'num'}, `${run.correct}/${run.total}`+(run.errors?` (e${run.errors})`:'')),
+        el('td',{class:'num'}, f2(s.turns ?? s.turns_total)),
+        el('td',{class:'num'}, f2(s.env_steps ?? s.env_steps_total)),
+        el('td',{class:'num'}, s.rewinds!=null?f2(s.rewinds):'–'),
+        el('td',{class:'num'}, s.segments!=null?f2(s.segments):'–'),
+        el('td',{class:'num'}, s.accuracy_any!=null?pct(s.accuracy_any):(s.success_at3!=null?pct(s.success_at3):'–')),
+      );
+      tbl.append(tr);
+    }
+    card.append(tbl);
+    // bars
+    for(const [name,run] of runs){
+      card.append(el('div',{class:'flex'},
+        el('span',{class:'muted',style:'width:150px'},run.variant),
+        (()=>{const b=el('div',{class:'bar',style:'flex:1'});b.append(el('span',{style:`width:${(run.score*100).toFixed(1)}%`}));return b;})(),
+        el('span',{class:'num',style:'width:52px'},pct(run.score))
+      ));
+    }
+    grid.append(card);
+  }
+  m.append(grid);
+  m.append(el('p',{class:'muted'},'Click any flow row (or a variant in the left rail) to browse its 64 tasks, then a task to replay the trajectory.'));
+}
+
+// ---------- Task list ----------
+async function selectVariant(v){
+  CUR_VARIANT=v; renderVariantList();
+  EPISODES = await (await fetch('/api/episodes/'+v)).json();
+  $('#task-count').textContent=`(${EPISODES.length})`;
+  const tl=$('#task-list'); tl.innerHTML='';
+  const tbl=el('table');
+  const isRewind=v.includes('rewind'), isLamer=v.includes('lamer');
+  const head=['#','res'];
+  if(isRewind) head.push('rw','seg','turns');
+  else if(isLamer) head.push('ep','rewards');
+  else head.push('turns','steps');
+  tbl.append(el('tr',{}, ...head.map(h=>el('th',{class:h==='#'?'':'num'},h))));
+  EPISODES.forEach((e,i)=>{
+    const cells=[el('td',{class:'num'}, String(e.idx))];
+    const res = e.termination==='error'? el('span',{class:'badge err'},'ERR') : (e.won? el('span',{class:'badge win'},'WIN'): el('span',{class:'badge loss'},'·'));
+    cells.push(el('td',{},res));
+    if(isRewind){ cells.push(el('td',{class:'num'},f2(e.rewinds)),el('td',{class:'num'},f2(e.segments)),el('td',{class:'num'},f2(e.turns))); }
+    else if(isLamer){ cells.push(el('td',{class:'num'},String(e.episodes_played??'–')), el('td',{class:'num pathmap'},(e.episode_rewards||[]).map(r=>r>0?'✓':'✗').join(''))); }
+    else { cells.push(el('td',{class:'num'},f2(e.turns)),el('td',{class:'num'},f2(e.env_steps))); }
+    const tr=el('tr',{class:'tasktr',onclick:()=>openEpisode(e.fname,tr)}, ...cells);
+    tr._fname=e.fname;
+    tbl.append(tr);
+  });
+  tl.append(tbl);
+  const m=$('#main'); m.innerHTML='';
+  m.append(el('h2',{},v));
+  const run=META.runs[v]||{};
+  const s=run.signal_averages||{};
+  const kp=el('div',{class:'kpis'});
+  kp.append(kpi('win-rate',pct(run.score)),kpi('solved',`${run.correct}/${run.total}`));
+  if(s.accuracy_any!=null)kp.append(kpi('any@3',pct(s.accuracy_any)));
+  if(s.rewinds!=null)kp.append(kpi('avg rewinds',f2(s.rewinds)));
+  if(s.segments!=null)kp.append(kpi('avg segments',f2(s.segments)));
+  kp.append(kpi('avg turns',f2(s.turns??s.turns_total)));
+  m.append(kp);
+  m.append(el('p',{class:'muted'},'Pick a task on the left to open its trajectory.'));
+}
+function kpi(k,v){return el('div',{class:'kpi'},el('div',{class:'k'},k),el('div',{class:'v'},v));}
+
+// ---------- Episode replay ----------
+async function openEpisode(fname,tr){
+  document.querySelectorAll('#task-list tr.active').forEach(x=>x.classList.remove('active'));
+  if(tr)tr.classList.add('active');
+  CUR_EP = await (await fetch(`/api/episode/${CUR_VARIANT}/${fname}`)).json();
+  CUR_TRAJ=0; CUR_STEP=0;
+  renderEpisode();
+}
+
+function renderEpisode(){
+  const ep=CUR_EP, m=$('#main'); m.innerHTML='';
+  const art=ep.artifacts||{}, task=ep.task||{};
+  m.append(el('div',{class:'crumbs',html:`<b>${CUR_VARIANT}</b> › task #${ep.eval_idx} › <span class="pathmap">${ep.id||''}</span>`}));
+
+  // header KPIs
+  const won = art.won ?? ep.is_correct;
+  const kp=el('div',{class:'kpis'});
+  kp.append(kpi('result', won?'WIN':(ep.termination_reason==='error'?'ERROR':'loss')));
+  if(task.dim_room)kp.append(kpi('board',`${task.dim_room.join('×')} / ${task.num_boxes}box`));
+  if(task.board_size)kp.append(kpi('board',`${task.board_size}×${task.board_size} / ${task.n_mines}mine`));
+  if(task.solution_length!=null)kp.append(kpi('opt sol len',task.solution_length));
+  if(art.rewinds!=null)kp.append(kpi('rewinds',`${art.rewinds} (m${art.model_rewinds}/f${art.forced_rewinds})`));
+  if(art.segments!=null)kp.append(kpi('segments',art.segments));
+  if(art.total_play_turns!=null)kp.append(kpi('global used',`${art.total_play_turns}/${art.step_budget}`));
+  if(art.branch_attempts_used!=null)kp.append(kpi('final seg used',`${art.branch_attempts_used}/${art.branch_attempt_budget}`));
+  if(art.episodes_played!=null)kp.append(kpi('episodes',`${art.episodes_played}/${art.num_episodes}`));
+  if(art.episode_rewards)kp.append(kpi('ep results',art.episode_rewards.map(r=>r>0?'✓':'✗').join(' ')));
+  if(art.turns!=null)kp.append(kpi('turns',art.turns));
+  if(art.exhausted_reason)kp.append(kpi('ended',art.exhausted_reason));
+  m.append(kp);
+
+  // rewind structure panel
+  if(art.rewind_log && art.rewind_log.length){
+    const p=el('div',{class:'panel'});
+    p.append(el('h3',{},`Rewind structure · ${art.rewind_log.length} rewind(s)`));
+    p.append(el('div',{class:'pathmap',html:`checkpoint path: ${(art.checkpoint_map||[]).map(c=>'C'+c).join(' → ')||'?'}`}));
+    art.rewind_log.forEach((rw,i)=>{
+      const mem=(art.branch_memories&&art.branch_memories[i])||{};
+      const it=el('div',{class:'rwitem'+(rw.kind==='model'?' model':'')});
+      it.append(el('div',{class:'hd'},`#${i+1} [${rw.kind}] seg${rw.segment}: C${rw.from} → C${rw.to}`));
+      it.append(el('div',{class:'muted'},rw.reason||''));
+      const memtxt=mem.memory||rw.memory||'';
+      if(memtxt){const d=el('details');d.append(el('summary',{},'branch memory (injected into the resumed prefix)'));d.append(el('div',{class:'memtext'},memtxt));it.append(d);}
+      p.append(it);
+    });
+    m.append(p);
+  }
+
+  // trajectory picker
+  const tp=el('div',{class:'trajpick'});
+  ep.trajectories.forEach((t,i)=>{
+    const isR=/reflect/.test(t.name);
+    tp.append(el('span',{class:'t'+(i===CUR_TRAJ?' active':'')+(isR?' reflect':''),onclick:()=>{CUR_TRAJ=i;CUR_STEP=0;renderEpisode();}},
+      `${t.name} ·${t.n_steps}`+(t.reward!=null?` r=${t.reward.toFixed(2)}`:'')));
+  });
+  m.append(tp);
+
+  const traj=ep.trajectories[CUR_TRAJ];
+  if(!traj){m.append(el('p',{class:'muted'},'(no trajectory — error episode)'));return;}
+  // step tabs
+  const tabs=el('div',{class:'steptabs'});
+  traj.steps.forEach((s,i)=>{
+    let cls='steptab'+(i===CUR_STEP?' active':'');
+    if(s.is_reflection)cls+=' reflect';
+    if(/rewind/i.test(s.action))cls+=' rewind';
+    tabs.append(el('span',{class:cls,onclick:()=>{CUR_STEP=i;renderEpisode();}}, s.is_reflection?'R':String(i)));
+  });
+  m.append(tabs);
+  renderStep(traj.steps[CUR_STEP], m);
+}
+
+function renderStep(step,m){
+  if(!step){m.append(el('p',{class:'muted'},'no step'));return;}
+  const isRewind=/rewind/i.test(step.action||'');
+  const grid=el('div',{class:'step-grid'});
+  // left: board
+  const left=el('div',{});
+  left.append(el('div',{class:'lbl'},step.is_reflection?'reflection prompt (input)':'board / observation'));
+  if(step.is_reflection){
+    left.append(el('pre',{class:'resp'},(step.observation||'').slice(0,8000)));
+  }else{
+    left.append(el('pre',{class:'board'}, step.board||'(board not parsed)'));
+    left.append(el('div',{style:'margin-top:10px'},
+      el('span',{class:'lbl'},'action '),
+      el('span',{class:'action-pill'+(isRewind?' rewind':'')}, step.final_action||step.action||'–')
+    ));
+    if(step.done)left.append(el('div',{class:'badge '+(step.reward>0?'win':'loss'),style:'margin-top:8px'},step.reward>0?'WON here':'terminal'));
+    const d=el('details');d.append(el('summary',{},'full observation prompt'));d.append(el('pre',{class:'resp'},step.observation||''));left.append(d);
+  }
+  grid.append(left);
+  // right: model response
+  const right=el('div',{});
+  right.append(el('div',{class:'lbl'},'model response (reasoning)'));
+  right.append(el('pre',{class:'resp'}, step.model_response||'(empty)'));
+  grid.append(right);
+  m.append(grid);
+}
+
+$('#show-dash').addEventListener('click',e=>{e.preventDefault();renderDashboard();});
+boot();
+</script>
+</body>
+</html>

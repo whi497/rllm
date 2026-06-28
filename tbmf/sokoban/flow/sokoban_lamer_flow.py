@@ -110,12 +110,13 @@ async def sokoban_lamer_flow(task: Task, config: AgentConfig) -> Episode:
     seed = int(meta.get("seed", LAMER_SOKOBAN_CONFIG["env_seed"]))
     dim_room = _parse_dim_room(meta.get("dim_room", (meta.get("dim_x", 6), meta.get("dim_y", 6))))
     num_boxes = int(meta.get("num_boxes", LAMER_SOKOBAN_CONFIG["num_boxes"]))
-    max_env_steps = int(meta.get("max_steps", LAMER_SOKOBAN_CONFIG["max_steps"]))
+    configured_max_env_steps = int(meta.get("max_steps", LAMER_SOKOBAN_CONFIG["max_steps"]))
     search_depth = int(meta.get("search_depth", LAMER_SOKOBAN_CONFIG["search_depth"]))
     min_steps = int(meta.get("min_steps", LAMER_SOKOBAN_CONFIG["min_steps"]))
     max_sol_steps = int(meta.get("max_sol_steps", LAMER_SOKOBAN_CONFIG["max_sol_steps"]))
     actions_per_turn = max(1, int(meta.get("actions_per_turn", LAMER_SOKOBAN_CONFIG["actions_per_turn"])))
     max_turns = int(meta.get("max_turns", LAMER_SOKOBAN_CONFIG["max_turns"]))
+    max_env_steps = max(configured_max_env_steps, max_turns * actions_per_turn)
     mode = str(meta.get("mode", LAMER_SOKOBAN_CONFIG["mode"]))
     puzzle_state = meta.get("puzzle_state")
 
@@ -314,6 +315,7 @@ async def sokoban_lamer_flow(task: Task, config: AgentConfig) -> Episode:
             "env_steps_total": total_env_steps,
             "dim_room": dim_room,
             "num_boxes": num_boxes,
+            "configured_max_steps": configured_max_env_steps,
             "max_steps": max_env_steps,
             "max_turns": max_turns,
             "num_episodes": num_episodes,

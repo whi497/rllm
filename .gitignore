@@ -226,3 +226,6 @@ gcp-key.json
 
 # IDE
 .vscode/
+
+# Eval outputs
+eval_outputs/

@@ -16,9 +16,12 @@ from omegaconf import DictConfig
 
 try:
     from ..eval.webshop_eval import webshop_evaluator
-    from ..eval.webshop_lamer_eval import webshop_lamer_evaluator
+    from ..eval.webshop_rewind_eval import webshop_rewind_evaluator
     from ..flow.webshop_flow import webshop_flow
-    from ..flow.webshop_lamer_flow import webshop_lamer_flow
+    from ..flow.webshop_rewind_choice_flow import webshop_rewind_choice_flow
+    from ..flow.webshop_rewind_reflect_reward_diff import webshop_rewind_reflect_reward_diff_flow
+    from ..flow.webshop_rewind_segment_novelty_gate import webshop_rewind_segment_novelty_gate_flow
+    from ..flow.webshop_rewind_undiscounted_final import webshop_rewind_undiscounted_final_flow
 except (ImportError, ValueError):
     from eval.webshop_eval import webshop_evaluator
     from eval.webshop_lamer_eval import webshop_lamer_evaluator
@@ -37,14 +40,15 @@ from rllm.experimental.unified_trainer import AgentTrainer
 def _build_multi_pass(config: DictConfig):
     val_cfg = config.get("rllm", {}).get("validation", {}).get("passes", {})
     single_ep_enabled = val_cfg.get("single_episode", {}).get("enabled", True)
-    multi_ep_enabled = val_cfg.get("multi_episode", {}).get("enabled", True)
+    rewind_enabled = val_cfg.get("rewind", {}).get("enabled", True)
+
 
     mp_config = MultiPassConfig(
         train_flow=webshop_flow,
         train_evaluator=webshop_evaluator,
         val_passes=[
             ValidationPass("single_episode", webshop_flow, webshop_evaluator, enabled=single_ep_enabled),
-            ValidationPass("multi_episode", webshop_lamer_flow, webshop_lamer_evaluator, enabled=multi_ep_enabled, sample_budget=1),
+            ValidationPass("rewind", webshop_rewind_segment_novelty_gate_flow, webshop_rewind_evaluator, enabled=rewind_enabled, sample_budget=1),
         ],
     )
     return MultiPassFlow(mp_config), MultiPassEvaluator(mp_config)

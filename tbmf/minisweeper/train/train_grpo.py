@@ -14,14 +14,14 @@ from omegaconf import DictConfig
 
 try:
     from ..eval.minisweeper_eval import minisweeper_evaluator
-    from ..eval.minisweeper_lamer_eval import minisweeper_lamer_evaluator
+    from ..eval.minisweeper_rewind_eval import minisweeper_rewind_evaluator
     from ..flow.minisweeper_flow import minisweeper_flow
-    from ..flow.minisweeper_lamer_flow import minisweeper_lamer_flow
+    from ..flow.minisweeper_rewind_undiscounted_final import minisweeper_rewind_undiscounted_final_flow
 except (ImportError, ValueError):
     from eval.minisweeper_eval import minisweeper_evaluator
-    from eval.minisweeper_lamer_eval import minisweeper_lamer_evaluator
+    from eval.minisweeper_rewind_eval import minisweeper_rewind_evaluator
     from flow.minisweeper_flow import minisweeper_flow
-    from flow.minisweeper_lamer_flow import minisweeper_lamer_flow
+    from flow.minisweeper_rewind_undiscounted_final import minisweeper_rewind_undiscounted_final_flow
 
 try:
     from .multi_pass import MultiPassConfig, MultiPassEvaluator, MultiPassFlow, ValidationPass
@@ -35,14 +35,14 @@ from rllm.experimental.unified_trainer import AgentTrainer
 def _build_multi_pass(config: DictConfig):
     val_cfg = config.get("rllm", {}).get("validation", {}).get("passes", {})
     single_ep_enabled = val_cfg.get("single_episode", {}).get("enabled", True)
-    multi_ep_enabled = val_cfg.get("multi_episode", {}).get("enabled", True)
+    rewind_enabled = val_cfg.get("rewind", {}).get("enabled", True)
 
     mp_config = MultiPassConfig(
         train_flow=minisweeper_flow,
         train_evaluator=minisweeper_evaluator,
         val_passes=[
             ValidationPass("single_episode", minisweeper_flow, minisweeper_evaluator, enabled=single_ep_enabled),
-            ValidationPass("multi_episode", minisweeper_lamer_flow, minisweeper_lamer_evaluator, enabled=multi_ep_enabled, sample_budget=1),
+            ValidationPass("rewind", minisweeper_rewind_undiscounted_final_flow, minisweeper_rewind_evaluator, enabled=rewind_enabled, sample_budget=1),
         ],
     )
     return MultiPassFlow(mp_config), MultiPassEvaluator(mp_config)

@@ -54,7 +54,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_STEP_BUDGET = 30
 DEFAULT_TRAJ_GAMMA = 0.7
 DEFAULT_SEGMENT_MAX_TURNS = 5
-DEFAULT_MAX_SEGMENTS = 8
+DEFAULT_MAX_SEGMENTS = 6
 DEFAULT_MAX_TOTAL_TURNS = 32
 MAX_REFLECTIONS_IN_CONTEXT = 3
 MAX_REFLECTION_CHARS = 1200
@@ -261,6 +261,8 @@ async def minisweeper_rewind_flow(task: Task, config: AgentConfig) -> Episode:
 
     step_budget = int(meta.get("step_budget", DEFAULT_STEP_BUDGET))
     segment_max_turns = int(meta.get("segment_max_turns", meta.get("max_turns", DEFAULT_SEGMENT_MAX_TURNS)))
+    # max_segments is the single source of truth for how many play segments (and
+    # thus rewinds: rewinds = segments - 1) an episode may run. Default 6.
     max_segments = int(meta.get("max_segments", DEFAULT_MAX_SEGMENTS))
     max_total_turns = int(meta.get("max_total_turns", DEFAULT_MAX_TOTAL_TURNS))
     traj_gamma = float(meta.get("traj_gamma", DEFAULT_TRAJ_GAMMA))

@@ -22,6 +22,7 @@ from env_service.minesweeper import MineSweeperEnv
 from openai import AsyncOpenAI
 
 import rllm
+from tbmf.flow_utils import classify_llm_failure
 from rllm.types import AgentConfig, Episode, Step, Task, Trajectory
 
 try:
@@ -33,11 +34,11 @@ except (ImportError, ValueError):
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_STEP_BUDGET = 30
+DEFAULT_STEP_BUDGET = 60
 DEFAULT_TRAJ_GAMMA = 0.7
-DEFAULT_SEGMENT_MAX_TURNS = 5
-DEFAULT_MAX_SEGMENTS = 8
-DEFAULT_MAX_TOTAL_TURNS = 40
+DEFAULT_SEGMENT_MAX_TURNS = 20
+DEFAULT_MAX_SEGMENTS = 6
+DEFAULT_MAX_TOTAL_TURNS = 64
 
 MAX_BRANCH_MEMORIES_IN_CONTEXT = 4
 MAX_BRANCH_MEMORY_CHARS = 1800
@@ -559,6 +560,15 @@ def _parse_suffix_int(name: str, prefix: str, default: int = -1) -> int:
         return int(match.group(1)) if match else default
 
 
+def _mean_trajectory_reward(trajectories: list[Trajectory], name_prefix: str) -> float:
+    rewards = [
+        float(t.reward)
+        for t in trajectories
+        if t.name.startswith(name_prefix) and t.reward is not None
+    ]
+    return sum(rewards) / len(rewards) if rewards else 0.0
+
+
 def _assign_cross_segment_rewards(
     trajectories: list[Trajectory],
     won: bool,
@@ -615,6 +625,8 @@ async def minisweeper_rewind_choice_flow(task: Task, config: AgentConfig) -> Epi
     max_env_steps = int(meta.get("max_steps", LAMER_MINISWEEPER_CONFIG["max_steps"]))
     step_budget = int(meta.get("step_budget", meta.get("model_step_budget", DEFAULT_STEP_BUDGET)))
     segment_max_turns = int(meta.get("segment_max_turns", DEFAULT_SEGMENT_MAX_TURNS))
+    # max_segments is the single source of truth for how many play segments (and
+    # thus rewinds: rewinds = segments - 1) an episode may run. Default 6.
     max_segments = int(meta.get("max_segments", DEFAULT_MAX_SEGMENTS))
     max_total_turns = int(meta.get("max_total_turns", max(DEFAULT_MAX_TOTAL_TURNS, step_budget + max_segments)))
     traj_gamma = float(meta.get("traj_gamma", DEFAULT_TRAJ_GAMMA))
@@ -622,7 +634,24 @@ async def minisweeper_rewind_choice_flow(task: Task, config: AgentConfig) -> Epi
     client = AsyncOpenAI(base_url=config.base_url, api_key="EMPTY")
     sampling = {k: v for k, v in config.sampling_params.items() if k != "top_k"}
 
-    env_step_budget = int(meta.get("env_step_budget", max(step_budget, max_env_steps)))
+    # The env-level step budget must NOT impose an extra limit on top of the
+    # model budgets. Every model action step reveals one cell, and rewinds let the
+    # model spend reveals across many branches without refunding env steps, so the
+    # worst case is one reveal for every model turn the controller may issue:
+    # max_segments * segment_max_turns. Derive a budget that comfortably covers it
+    # (with margin) so only the model-facing budgets gate the episode.
+    env_step_budget = int(
+        meta.get(
+            "env_step_budget",
+            max(
+                step_budget,
+                max_total_turns,
+                max_segments * segment_max_turns,
+                max_env_steps,
+            )
+            + max_segments,
+        )
+    )
     session = await create_env_session(
         MineSweeperEnv,
         session_mode="local",
@@ -746,6 +775,7 @@ async def minisweeper_rewind_choice_flow(task: Task, config: AgentConfig) -> Epi
                     branch_attempts_used += 1
                     content = resp.choices[0].message.content or ""
                 except Exception as e:
+                    failure = classify_llm_failure(e)
                     llm_action_s += time.perf_counter() - t_llm
                     total_llm_calls += 1
                     total_play_turns += 1
@@ -762,23 +792,23 @@ async def minisweeper_rewind_choice_flow(task: Task, config: AgentConfig) -> Epi
                             chat_completions=list(messages),
                             observation=obs_prompt,
                             model_response="",
-                            action="llm_failed",
-                            thought=f"LLM call failed: {e}",
+                            action=failure.kind,
+                            thought=failure.thought,
                         )
                     )
                     segment_events.append(
                         BranchEvent(
-                            kind="llm_failed",
+                            kind=failure.kind,
                             position_before=current_position,
                             position_after=current_position,
-                            action="llm_failed",
-                            outcome=str(e),
+                            action=failure.kind,
+                            outcome=failure.outcome,
                             observation_after=observation,
                         )
                     )
                     force_rewind = True
                     rewind_kind = "forced"
-                    force_rewind_reason = "forced rewind: LLM call failed"
+                    force_rewind_reason = failure.rewind_reason
                     break
 
                 active_messages.append(_message("assistant", content))
@@ -1253,6 +1283,9 @@ async def minisweeper_rewind_choice_flow(task: Task, config: AgentConfig) -> Epi
             traj_gamma=traj_gamma,
         )
 
+        reflect_reward_avg = _mean_trajectory_reward(trajectories, "minisweeper_reflect")
+        seg_reward_avg = _mean_trajectory_reward(trajectories, "minisweeper_seg")
+
         return Episode(
             trajectories=trajectories,
             metrics={
@@ -1282,6 +1315,8 @@ async def minisweeper_rewind_choice_flow(task: Task, config: AgentConfig) -> Epi
                 "forced_context_folds": forced_context_folds,
                 "branch_memories": branch_memory_records,
                 "reflection_history": reflection_history,
+                "reflect_reward_avg": reflect_reward_avg,
+                "seg_reward_avg": seg_reward_avg,
                 "rewind_log": rewind_log,
                 "global_messages": global_messages,
                 "final_game_position": len(interaction_history),

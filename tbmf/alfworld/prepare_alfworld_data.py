@@ -79,8 +79,15 @@ def prepare_alfworld_data(
         max_steps: Maximum episode steps for each task.
     """
     if data_root is None:
-        repo_root = Path(__file__).resolve().parent.parent.parent
-        data_root = str(repo_root / "datasets" / "alfworld" / "json_2.1.1")
+        search_root = Path(__file__).resolve().parent
+        for parent in search_root.parents:
+            candidate = parent / "datasets" / "alfworld" / "json_2.1.1"
+            if candidate.exists():
+                data_root = str(candidate)
+                break
+        else:
+            repo_root = Path(__file__).resolve().parent.parent.parent
+            data_root = str(repo_root / "datasets" / "alfworld" / "json_2.1.1")
 
     data_root = os.path.realpath(data_root)
     if not os.path.isdir(data_root):

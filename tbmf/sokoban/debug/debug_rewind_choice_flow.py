@@ -52,7 +52,7 @@ from rllm.data.dataset import DatasetRegistry
 from rllm.types import AgentConfig, Task
 
 # Import the flow module so we can monkeypatch symbols it resolves at runtime.
-from flow import sokoban_rewind_choice_flow as flow_mod
+from flow import sokoban_rewind_choice_flow_refacted as flow_mod
 
 
 # ----------------------------------------------------------------------------

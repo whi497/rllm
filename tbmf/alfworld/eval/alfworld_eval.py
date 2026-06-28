@@ -22,6 +22,6 @@ def alfworld_evaluator(task: dict, episode: Episode) -> EvalOutput:
         signals=[
             Signal(name="accuracy", value=reward),
             Signal(name="turns", value=float(episode.artifacts.get("turns", 0))),
-            Signal(name="task_type", value=episode.artifacts.get("task_type", "unknown")),
         ],
+        metadata={"task_type": episode.artifacts.get("task_type", "unknown")},
     )

@@ -20,6 +20,11 @@ import rllm
 from rllm.types import AgentConfig, Episode, Step, Task, Trajectory
 
 try:
+    from ...flow_utils import classify_llm_failure
+except (ImportError, ValueError):
+    from tbmf.flow_utils import classify_llm_failure
+
+try:
     from .alfworld_flow import parse_action
     from ..alfworld_prompt import get_alfworld_prompt
 except (ImportError, ValueError):
@@ -82,6 +87,8 @@ async def alfworld_step_flow(task: Task, config: AgentConfig) -> Episode:
     won = False
     done = False
     last_action: str | None = None
+    llm_failure_kind: str | None = None
+    llm_failure_outcome: str | None = None
 
     async with session:
         for turn in range(max_steps):
@@ -112,7 +119,20 @@ async def alfworld_step_flow(task: Task, config: AgentConfig) -> Episode:
                     timeout=120,
                 )
             except Exception as e:
-                logger.warning("alfworld_step task %s turn %d: LLM call failed: %s", task.id, turn, e)
+                failure = classify_llm_failure(e)
+                llm_failure_kind = failure.kind
+                llm_failure_outcome = failure.outcome
+                logger.warning("alfworld_step task %s turn %d: %s", task.id, turn, failure.thought)
+                steps.append(
+                    Step(
+                        chat_completions=messages,
+                        observation=prompt,
+                        model_response="",
+                        action=failure.kind,
+                        thought=failure.thought,
+                        metadata={"llm_failure_kind": failure.kind, "outcome": failure.outcome},
+                    )
+                )
                 break
 
             content = resp.choices[0].message.content or ""
@@ -159,6 +179,8 @@ async def alfworld_step_flow(task: Task, config: AgentConfig) -> Episode:
             "won": won,
             "turns": len(steps),
             "last_action": last_action,
+            "llm_failure_kind": llm_failure_kind,
+            "llm_failure_outcome": llm_failure_outcome,
             "task_type": task_type,
             "env_backend": "ray",
         },

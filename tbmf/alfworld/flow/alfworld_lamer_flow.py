@@ -21,6 +21,11 @@ import rllm
 from rllm.types import AgentConfig, Episode, Step, Task, Trajectory
 
 try:
+    from ...flow_utils import classify_llm_failure
+except (ImportError, ValueError):
+    from tbmf.flow_utils import classify_llm_failure
+
+try:
     from .alfworld_flow import parse_action, SYSTEM_PROMPT
 except (ImportError, ValueError):
     from flow.alfworld_flow import parse_action, SYSTEM_PROMPT
@@ -87,6 +92,7 @@ async def alfworld_lamer_flow(task: Task, config: AgentConfig) -> Episode:
     total_turns = 0
     env_init_s = 0.0
     env_step_s = 0.0
+    llm_failure_records: list[dict] = []
 
     for ep_idx in range(num_episodes):
         if not lamer.should_continue and ep_idx > 0:
@@ -132,7 +138,20 @@ async def alfworld_lamer_flow(task: Task, config: AgentConfig) -> Episode:
                         model=config.model, messages=messages, **sampling, timeout=120,
                     )
                 except Exception as e:
-                    logger.warning("alfworld_lamer task %s ep %d turn %d: LLM failed: %s", task.id, ep_idx, turn, e)
+                    failure = classify_llm_failure(e)
+                    logger.warning("alfworld_lamer task %s ep %d turn %d: %s", task.id, ep_idx, turn, failure.thought)
+                    llm_failure_records.append(
+                        {"phase": "play", "episode": ep_idx, "turn": turn, "kind": failure.kind, "outcome": failure.outcome}
+                    )
+                    steps.append(
+                        Step(
+                            chat_completions=list(messages),
+                            model_response="",
+                            action=failure.kind,
+                            thought=failure.thought,
+                            metadata={"llm_failure_kind": failure.kind, "outcome": failure.outcome},
+                        )
+                    )
                     break
 
                 content = resp.choices[0].message.content or ""
@@ -206,7 +225,11 @@ async def alfworld_lamer_flow(task: Task, config: AgentConfig) -> Episode:
                 )
                 reflect_content = resp.choices[0].message.content or ""
             except Exception as e:
-                logger.warning("alfworld_lamer task %s ep %d: reflect failed: %s", task.id, ep_idx, e)
+                failure = classify_llm_failure(e)
+                logger.warning("alfworld_lamer task %s ep %d: reflect %s", task.id, ep_idx, failure.thought)
+                llm_failure_records.append(
+                    {"phase": "reflect", "episode": ep_idx, "turn": None, "kind": failure.kind, "outcome": failure.outcome}
+                )
                 reflect_content = ""
 
             remark_text = parse_remark(reflect_content) if reflect_content else ""
@@ -243,6 +266,7 @@ async def alfworld_lamer_flow(task: Task, config: AgentConfig) -> Episode:
             "task_type": task_type,
             "num_episodes": num_episodes,
             "traj_gamma": traj_gamma,
+            "llm_failure_records": llm_failure_records,
         },
         is_correct=lamer.won_any,
     )

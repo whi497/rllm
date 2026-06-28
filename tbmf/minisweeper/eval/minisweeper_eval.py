@@ -18,6 +18,5 @@ def minisweeper_evaluator(task: dict, episode: Episode) -> EvalOutput:
             Signal(name="accuracy", value=reward),
             Signal(name="turns", value=float(episode.artifacts.get("turns", 0))),
             Signal(name="env_steps", value=float(episode.artifacts.get("env_steps", 0))),
-            Signal(name="n_mines", value=float(episode.artifacts.get("n_mines", 0))),
         ],
     )

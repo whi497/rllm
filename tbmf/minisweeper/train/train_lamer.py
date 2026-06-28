@@ -10,7 +10,7 @@ Usage::
 """
 
 import hydra
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 try:
     from ..eval.minisweeper_eval import minisweeper_evaluator
@@ -28,8 +28,24 @@ try:
 except (ImportError, ValueError):
     from multi_pass import MultiPassConfig, MultiPassEvaluator, MultiPassFlow, ValidationPass
 
-from rllm.data.dataset import DatasetRegistry
+from rllm.data.dataset import Dataset, DatasetRegistry
 from rllm.experimental.unified_trainer import AgentTrainer
+
+
+def _with_task_metadata_overrides(dataset: Dataset, overrides: DictConfig | None) -> Dataset:
+    if not overrides:
+        return dataset
+
+    override_dict = OmegaConf.to_container(overrides, resolve=True)
+    if not isinstance(override_dict, dict) or not override_dict:
+        return dataset
+
+    rows = []
+    for row in dataset.get_data():
+        updated = dict(row)
+        updated.update(override_dict)
+        rows.append(updated)
+    return Dataset(rows, name=dataset.name, split=dataset.split)
 
 
 def _build_multi_pass(config: DictConfig):
@@ -55,6 +71,10 @@ def main(config: DictConfig):
 
     if train_dataset is None or val_dataset is None:
         raise RuntimeError("MiniSweeper dataset not found. Run: python3 tbmf/minisweeper/prepare_minisweeper_data.py")
+
+    metadata_overrides = config.get("rllm", {}).get("task_metadata_overrides")
+    train_dataset = _with_task_metadata_overrides(train_dataset, metadata_overrides)
+    val_dataset = _with_task_metadata_overrides(val_dataset, metadata_overrides)
 
     flow, evaluator = _build_multi_pass(config)
 

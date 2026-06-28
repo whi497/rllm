@@ -750,6 +750,12 @@ class UnifiedTrainer:
 
             for episode, data_source in zip(val_episodes, data_sources, strict=True):
                 for key, value in episode.metrics.items():
+                    # Timing metrics are not tracked in validation: the two val
+                    # passes' flows emit same-named time/* keys that get averaged
+                    # together, so the value is uninformative. They remain on the
+                    # training side (batch/time/*).
+                    if key.startswith("time/"):
+                        continue
                     # episode.metrics can contain non-numeric values -- skip in the workflow metrics.
                     try:
                         workflow_metrics_by_source[data_source][key].append(float(value))

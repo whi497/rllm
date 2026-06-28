@@ -96,6 +96,107 @@ class TaskHooks(Protocol):
     def setup(self, task: Task, agent_flow: AgentFlow, uid: str) -> TaskContext: ...
 
 
+@dataclass
+class _TraceAlignment:
+    aligned_steps: list[Step]
+    dropped_phantom: int = 0
+    dropped_remaining_malformed: int = 0
+    dropped_remaining_valid: int = 0
+    paired_malformed: int = 0
+
+
+def _missing_token_ids(step: Step) -> bool:
+    model_output = step.model_output
+    return (
+        model_output is None
+        or not model_output.prompt_ids
+        or not model_output.completion_ids
+    )
+
+
+def _trace_matches_agent_step(trace_step: Step, agent_step: Step) -> bool:
+    trace_messages = trace_step.chat_completions[:-1] if trace_step.chat_completions else []
+    agent_messages = agent_step.chat_completions or []
+    if not trace_messages or not agent_messages:
+        return True
+    if len(agent_messages) < len(trace_messages):
+        return False
+    if agent_messages[: len(trace_messages)] != trace_messages:
+        return False
+
+    trace_response = trace_step.model_response or ""
+    agent_response = agent_step.model_response or ""
+    if agent_response:
+        return trace_response == agent_response
+    return True
+
+
+def _align_training_steps_to_agent_steps(
+    training_steps: list[Step],
+    agent_steps: list[Step],
+    uid: str,
+) -> _TraceAlignment:
+    aligned_steps: list[Step] = []
+    trace_idx = 0
+    dropped_phantom = 0
+
+    for agent_step in agent_steps:
+        while trace_idx < len(training_steps):
+            remaining_traces = len(training_steps) - trace_idx
+            remaining_agent_steps = len(agent_steps) - len(aligned_steps)
+            candidate = training_steps[trace_idx]
+            if (
+                _missing_token_ids(candidate)
+                and remaining_traces > remaining_agent_steps
+                and not _trace_matches_agent_step(candidate, agent_step)
+            ):
+                dropped_phantom += 1
+                trace_idx += 1
+                continue
+            break
+
+        if trace_idx >= len(training_steps):
+            break
+
+        aligned_steps.append(training_steps[trace_idx])
+        trace_idx += 1
+
+    remaining = training_steps[trace_idx:]
+    dropped_remaining_malformed = sum(1 for step in remaining if _missing_token_ids(step))
+    dropped_remaining_valid = len(remaining) - dropped_remaining_malformed
+    paired_malformed = sum(1 for step in aligned_steps if _missing_token_ids(step))
+
+    if dropped_phantom:
+        logger.warning("[%s] dropping %d unmatched malformed trace(s) before alignment", uid, dropped_phantom)
+    if dropped_remaining_malformed:
+        logger.warning("[%s] dropping %d trailing malformed trace(s) after alignment", uid, dropped_remaining_malformed)
+    if dropped_remaining_valid:
+        logger.warning("[%s] dropping %d unmatched valid trace(s) after alignment", uid, dropped_remaining_valid)
+    if paired_malformed:
+        logger.warning("[%s] preserving %d agent step(s) without token data; they will be skipped by training transform", uid, paired_malformed)
+
+    return _TraceAlignment(
+        aligned_steps=aligned_steps,
+        dropped_phantom=dropped_phantom,
+        dropped_remaining_malformed=dropped_remaining_malformed,
+        dropped_remaining_valid=dropped_remaining_valid,
+        paired_malformed=paired_malformed,
+    )
+
+
+def _non_training_agent_step(agent_step: Step, trace_step: Step) -> Step:
+    step = agent_step.model_copy(deep=True)
+    step.model_output = None
+    step.prompt_ids = []
+    step.response_ids = []
+    step.logprobs = []
+    metadata = dict(step.metadata or {})
+    metadata["rllm_enrich_skip_reason"] = "missing_token_ids"
+    metadata["rllm_enrich_trace_id"] = trace_step.id
+    step.metadata = metadata
+    return step
+
+
 def enrich_episode_with_traces(
     episode: Episode,
     traces: list[TraceRecord],
@@ -114,10 +215,11 @@ def enrich_episode_with_traces(
     - Create training Steps from traces, preserve rewards/done flags from
       agent Steps.
 
-    When ``strict=True`` (default; training path): empty ``prompt_token_ids``
-    or ``completion_token_ids`` raise :class:`EnrichMismatchError` so the
-    engine's retry path can reissue the rollout. Token IDs are required for
-    loss math, and missing ones from vLLM indicate an upstream failure.
+    When ``strict=True`` (default; training path): token IDs are required for
+    loss math. If the agent supplied no steps, empty token IDs raise
+    :class:`EnrichMismatchError`; if the agent supplied steps, malformed trace
+    rows are aligned to agent-side failure steps as non-training rows so
+    downstream transforms can skip them without losing the rollout.
 
     When ``strict=False`` (eval path against non-vLLM upstreams like the
     LiteLLM proxy or OpenAI/Anthropic directly): empty token IDs are OK —
@@ -143,46 +245,14 @@ def enrich_episode_with_traces(
     # Convert all traces to training steps
     training_steps = [trace_record_to_step(t) for t in traces]
 
-    # Bad traces (missing or empty token_ids) silently corrupt loss math and
-    # shrink GRPO groups; raise on real mismatches so retries can reissue.
     n_agent_steps = sum(len(t.steps) for t in episode.trajectories)
     agent_populates_steps = any(len(t.steps) > 0 for t in episode.trajectories)
+    trace_alignment: _TraceAlignment | None = None
 
-    # Common case: vLLM returns an empty body on the final call (e.g. prompt
-    # hit max_model_len, or weight-sync disconnect). The agent breaks without
-    # recording a Step, leaving N+1 traces vs N agent_steps with the trailing
-    # one malformed. Drop the trailing trace rather than burn the whole
-    # rollout — at high MAX_TURNS the failure rate would exhaust retries.
-    if agent_populates_steps and len(training_steps) > n_agent_steps:
-        extra = training_steps[n_agent_steps:]
-        extras_all_malformed = all(not s.model_output.prompt_ids or not s.model_output.completion_ids for s in extra)
-        if extras_all_malformed:
-            logger.warning(
-                "[%s] dropping %d trailing malformed trace(s); keeping %d aligned with agent_steps",
-                uid,
-                len(extra),
-                n_agent_steps,
-            )
-            training_steps = training_steps[:n_agent_steps]
-
-    # Multi-episode flows (e.g. LaMer) can have failed LLM calls mid-flow:
-    # the gateway captures the trace (with empty completion_token_ids) but the
-    # agent catches the exception and doesn't record a Step.  These "phantom"
-    # traces are scattered (not just trailing), so the above cleanup misses
-    # them.  When the excess count exactly matches the number of
-    # empty-completion traces, drop them to restore positional alignment.
-    if agent_populates_steps and len(training_steps) > n_agent_steps:
-        excess = len(training_steps) - n_agent_steps
-        n_empty_compl = sum(1 for s in training_steps if not s.model_output.completion_ids)
-        if excess == n_empty_compl and n_empty_compl > 0:
-            logger.warning(
-                "[%s] dropping %d scattered phantom trace(s) with empty completion_ids; "
-                "keeping %d aligned with agent_steps",
-                uid,
-                n_empty_compl,
-                n_agent_steps,
-            )
-            training_steps = [s for s in training_steps if s.model_output.completion_ids]
+    if agent_populates_steps:
+        agent_steps = [step for traj in episode.trajectories for step in traj.steps]
+        trace_alignment = _align_training_steps_to_agent_steps(training_steps, agent_steps, uid)
+        training_steps = trace_alignment.aligned_steps
 
     empty_prompt = sum(1 for s in training_steps if not s.model_output.prompt_ids)
     empty_compl = sum(1 for s in training_steps if not s.model_output.completion_ids)
@@ -194,7 +264,7 @@ def enrich_episode_with_traces(
     # Eval against external providers (OpenAI/Anthropic via LiteLLM proxy)
     # legitimately has empty token IDs and that's fine — the evaluator
     # reads `model_response` / `chat_completions`, not token IDs.
-    token_ids_missing = strict and (empty_prompt or empty_compl)
+    token_ids_missing = strict and not agent_populates_steps and (empty_prompt or empty_compl)
     if traces_short or token_ids_missing:
         raise EnrichMismatchError(f"[{uid}] enrich mismatch: traces={len(training_steps)} agent_steps={n_agent_steps} empty_prompt_ids={empty_prompt} empty_completion_ids={empty_compl}")
 
@@ -211,11 +281,14 @@ def enrich_episode_with_traces(
             # when agent_populates_steps is True.
             for agent_step in traj.steps:
                 step = training_steps[trace_idx]
-                # Preserve agent-side fields (the trace doesn't carry these — it
-                # only holds the raw LLM call) -- action, reward, done
-                step.action = agent_step.action
-                step.reward = agent_step.reward
-                step.done = agent_step.done
+                if strict and _missing_token_ids(step):
+                    step = _non_training_agent_step(agent_step, step)
+                else:
+                    # Preserve agent-side fields (the trace doesn't carry these —
+                    # it only holds the raw LLM call) -- action, reward, done
+                    step.action = agent_step.action
+                    step.reward = agent_step.reward
+                    step.done = agent_step.done
                 trace_idx += 1
                 traj_steps.append(step)
         else:
@@ -250,6 +323,11 @@ def enrich_episode_with_traces(
     metrics = compute_step_metrics(enriched_trajectories)
     metrics["empty"] = int(len(traces) == 0)
     metrics["steps_collected"] = len(traces)
+    if trace_alignment is not None:
+        metrics["traces_dropped_phantom"] = trace_alignment.dropped_phantom
+        metrics["traces_dropped_malformed"] = trace_alignment.dropped_remaining_malformed
+        metrics["traces_dropped_valid"] = trace_alignment.dropped_remaining_valid
+        metrics["steps_skipped_missing_token_ids"] = trace_alignment.paired_malformed
     metrics.update(episode.metrics)
 
     return Episode(

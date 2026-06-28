@@ -20,6 +20,11 @@ import rllm
 from rllm.types import AgentConfig, Episode, Step, Task, Trajectory
 
 try:
+    from ...flow_utils import classify_llm_failure
+except (ImportError, ValueError):
+    from tbmf.flow_utils import classify_llm_failure
+
+try:
     from ..prepare_webshop_data import LAMER_WEBSHOP_CONFIG
 except (ImportError, ValueError):
     from prepare_webshop_data import LAMER_WEBSHOP_CONFIG
@@ -252,6 +257,8 @@ async def webshop_flow(task: Task, config: AgentConfig) -> Episode:
     final_reward = 0.0
     task_score = 0.0
     last_action = None
+    llm_failure_kind: str | None = None
+    llm_failure_outcome: str | None = None
     env_step_s = 0.0
     sampling = {k: v for k, v in config.sampling_params.items() if k != "top_k"}
 
@@ -270,7 +277,22 @@ async def webshop_flow(task: Task, config: AgentConfig) -> Episode:
                 if turn == 0:
                     logger.info("webshop rollout %s: first LLM response received", uid)
             except Exception as e:
-                logger.warning("webshop task %s turn %d: LLM call failed: %s", task.id, turn, e)
+                failure = classify_llm_failure(e)
+                llm_failure_kind = failure.kind
+                llm_failure_outcome = failure.outcome
+                logger.warning("webshop task %s turn %d: %s", task.id, turn, failure.thought)
+                steps.append(
+                    Step(
+                        chat_completions=list(model_messages),
+                        observation=current_prompt,
+                        model_response="",
+                        action=failure.kind,
+                        thought=failure.thought,
+                        reward=final_reward,
+                        done=True,
+                        metadata={"llm_failure_kind": failure.kind, "outcome": failure.outcome},
+                    )
+                )
                 break
 
             raw_content = resp.choices[0].message.content or ""
@@ -340,6 +362,8 @@ async def webshop_flow(task: Task, config: AgentConfig) -> Episode:
             "turns": len(steps),
             "env_steps": env_steps,
             "last_action": last_action,
+            "llm_failure_kind": llm_failure_kind,
+            "llm_failure_outcome": llm_failure_outcome,
             "session_id": session_id,
             "max_steps": max_steps,
             "max_turns": max_turns,

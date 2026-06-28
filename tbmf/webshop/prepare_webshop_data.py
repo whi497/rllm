@@ -64,6 +64,15 @@ def _split_indices(
     return [int(v) for v in rng.choice(np.arange(low, high), size=n, replace=False)]
 
 
+def _require_non_empty_split(split: str, rows: list[dict]) -> None:
+    if rows:
+        return
+    raise ValueError(
+        f"WebShop {split} split is empty. Use a positive --{split}-size or --use-full-data; "
+        "empty splits produce invalid verl parquet input."
+    )
+
+
 def _row(
     idx: int,
     session_id: int,
@@ -121,6 +130,7 @@ def prepare_webshop_data(
 ):
     """Register WebShop train/test datasets."""
     data_root_path = Path(data_root).expanduser() if data_root is not None else _resolve_webshop_data_root()
+    data_root_path = data_root_path.resolve()
     if not data_root_path.exists():
         raise FileNotFoundError(
             f"WebShop data root not found: {data_root_path}\n"
@@ -175,6 +185,9 @@ def prepare_webshop_data(
         )
         for i, session_id in enumerate(test_indices)
     ]
+
+    _require_non_empty_split("train", train_rows)
+    _require_non_empty_split("test", test_rows)
 
     train_dataset = DatasetRegistry.register_dataset("webshop", train_rows, "train")
     test_dataset = DatasetRegistry.register_dataset("webshop", test_rows, "test")

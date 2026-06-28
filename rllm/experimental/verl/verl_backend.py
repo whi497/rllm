@@ -209,6 +209,29 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         )
         self.checkpoint_manager.sleep_replicas()
 
+    def _uses_naive_checkpoint_engine(self) -> bool:
+        """Whether weights are synced through the colocated rollout adapter."""
+
+        return self.checkpoint_manager is not None and self.checkpoint_manager.backend == "naive"
+
+    def _rollout_free_cache_engine_enabled(self) -> bool:
+        """Whether rollout replicas should enter vLLM sleep mode."""
+
+        return bool(self.full_config.actor_rollout_ref.rollout.get("free_cache_engine", True))
+
+    async def _resume_replica_generation_if_needed(self) -> None:
+        """Resume vLLM scheduling after naive colocated weight sync.
+
+        In the naive backend, ``CheckpointEngineManager.update_weights`` delegates
+        to the actor-rollout workers. That path wakes weights and KV cache, but it
+        does not go through the manager's non-naive ``resume_generation`` step.
+        """
+
+        if not self._uses_naive_checkpoint_engine() or self.checkpoint_manager is None:
+            return
+        for replica in self.checkpoint_manager.replicas:
+            await replica.resume_generation()
+
     # =========================================================================
     # BackendProtocol interface methods
     # =========================================================================
@@ -318,7 +341,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         # Step 3: sleep the replicas to free kv_cache before weight sync (if free_cache_engine is enabled)
         # Only sleep during training — validation doesn't update weights, so there's no wake_up call after it.
         # Sleeping after validation would leave replicas asleep, causing CUDA illegal memory access on the next generation.
-        if not is_validation:
+        if not is_validation and self._rollout_free_cache_engine_enabled():
             await self.checkpoint_manager.sleep_replicas()
         return episodes
 
@@ -691,6 +714,7 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
         self.global_steps = trainer_state.global_step
         self.global_steps = load_checkpoint(self.config, self.actor_rollout_wg, train_dataloader=self.train_dataloader)
         await self.checkpoint_manager.update_weights(self.global_steps)
+        await self._resume_replica_generation_if_needed()
         self._mark_actor_model_maybe_offloaded_by_weight_sync()
         # we need to set trainer's global_steps to sync with the loaded checkpoint
         trainer_state.global_step = self.global_steps
@@ -718,15 +742,21 @@ class VerlBackend(BackendProtocol[Iterable, DataProto]):
             with simple_timer("save_checkpoint", trainer_state.timing_dict):
                 save_checkpoint(self.config, self.global_steps, self.actor_rollout_wg, train_dataloader=self.train_dataloader)
 
+        metrics = trainer_state.metrics
+        metrics.update({"training/global_step": trainer_state.global_step, "training/epoch": trainer_state.epoch})
+        if trainer_state.backend_batch is None:
+            metrics["batch/skipped_empty_backend_batch"] = 1
+            metrics.update({f"timing_s/{name}": value for name, value in trainer_state.timing_dict.items()})
+            return
+
         # Weight synchronization
         with simple_timer("update_weights", trainer_state.timing_dict):
             await self.checkpoint_manager.update_weights(trainer_state.global_step)
+            await self._resume_replica_generation_if_needed()
             self._mark_actor_model_maybe_offloaded_by_weight_sync()
 
         # Update metrics
         batch: DataProto = trainer_state.backend_batch  # type: ignore[attr-defined]
-        metrics = trainer_state.metrics
-        metrics.update({"training/global_step": trainer_state.global_step, "training/epoch": trainer_state.epoch})
         metrics.update(compute_data_metrics(batch=batch, use_critic=False))
         metrics.update(compute_timing_metrics(batch=batch, timing_raw=trainer_state.timing_dict))
 

@@ -46,6 +46,7 @@ from env_service.sokoban import SokobanEnv
 from openai import AsyncOpenAI
 
 import rllm
+from tbmf.flow_utils import classify_llm_failure
 from rllm.types import AgentConfig, Episode, Step, Task, Trajectory
 
 try:
@@ -70,14 +71,14 @@ logger = logging.getLogger(__name__)
 DEFAULT_STEP_BUDGET = 60
 DEFAULT_TRAJ_GAMMA = 0.7
 DEFAULT_SEGMENT_MAX_TURNS = 20
-DEFAULT_MAX_SEGMENTS = 12
+DEFAULT_MAX_SEGMENTS = 6
 DEFAULT_MAX_TOTAL_TURNS = 64
 
 MAX_BRANCH_MEMORIES_IN_CONTEXT = 3
-MAX_BRANCH_MEMORY_CHARS = 2400
+MAX_BRANCH_MEMORY_CHARS = 4800
 MAX_REFLECTIONS_IN_CONTEXT = 3
-MAX_REFLECTION_CHARS = 2400
-MAX_BRANCH_HISTORY_CHARS = 24000
+MAX_REFLECTION_CHARS = 4800
+MAX_BRANCH_HISTORY_CHARS = 30000
 MAX_ACTIVE_BRANCH_EVENTS = 10
 MAX_MODEL_RESPONSE_IN_HISTORY_CHARS = 900
 
@@ -279,7 +280,7 @@ Only the final `<action>...</action>` tag will be executed.
 
 
 REWIND_REFLECT_PROMPT = """\
-You are an expert Sokoban player reflecting on a branch attempt.
+You are an expert Sokoban player independently reflecting on a branch attempt.
 
 # Symbols and Their Meaning
 - Walls (`#`): These block movement.
@@ -291,12 +292,83 @@ You are an expert Sokoban player reflecting on a branch attempt.
 - Player on Target (`S`): Agent standing on a target.
 
 # Core rollback semantics
-The current branch is at C_{rewind_from_step}. The model must choose or confirm
-the rewind target before the environment is restored.
-The knowledge state must move forward: compress the branch attempt into a small branch memory.
-Do not preserve the full trajectory. Preserve only information useful for future decisions.
+The game was at step C_{rewind_from_step} when you decided to rewind back to step C_{rewind_to_step}.
 
-{rewind_target_instruction}
+Thus the env state returns to step C_{rewind_to_step}, Your goal is to push the knowledge state forward.
+compress the branch attempt into a small branch memory that record what have you done that lead to what result,
+what have you learned, what you should avoid and what you should do next.
+Do not preserve the full trajectory. Preserve only information useful for future decisions
+the core target is to help move closer to the target during the next new attempt or try explore other states.
+
+# Context
+{rewind_target_context}
+
+# Rewind trigger
+{rewind_reason}
+
+# Relevant checkpoint states
+{checkpoint_context}
+
+# State at C_{rewind_from_step} before rewinding
+{current_observation}
+
+# Branch history from C_{rewind_to_step} to C_{rewind_from_step}
+{history_after_rewind}
+
+# Prior reflection outputs
+{reflection_history_context}
+
+# Your task
+Reflect on the branch attempt and produce a concise branch memory for the next new attempt direction from the checkpoint you return to.
+
+
+Focus on:
+- Invaild actions that environment not accepted or skipped by the environment;
+- failure reason or likely bad push/walk sequence;
+- boxes pushed into corners, walls, dead zones, or away from reachable targets;
+- blocked/no-op moves or invalid loops that should not be repeated;
+- useful spatial facts about player access, box positions, target positions, and required order;
+- the task is always solvable, so you should always find a concrete improved plan from the checkpoint you return to.
+
+Include a compact branch memory inside <remark> </remark> tags.
+Use this structure, replacing C_j with the selected checkpoint:
+<remark>
+# History Attempt from C_{rewind_to_step} to C_{rewind_from_step}
+State at C_{rewind_to_step}:
+{rewind_target_context}
+State at C_{rewind_from_step}:
+{current_observation}
+Actions I have done: ...
+What's bad about the actions: ...
+What I have learned: ...
+What I should avoid: ...
+How to move forward: ...
+Next new Plan from C_j that can move forward and to a different state: ...
+</remark>
+"""
+
+
+REWIND_REFLECT_PROMPT_WITH_CKPT_CHOICE = """\
+You are an expert Sokoban player independently reflecting on a branch attempt.
+
+# Symbols and Their Meaning
+- Walls (`#`): These block movement.
+- Floor (`_`): Open spaces where you can walk and move boxes.
+- Targets (`O`): The spots where boxes need to go.
+- Boxes (`X`): These are what you need to push onto the targets.
+- Player (`P`): The agent.
+- Box on Target (`√`): A box successfully placed on a target.
+- Player on Target (`S`): Agent standing on a target.
+
+# Core rollback semantics
+A forced rewind was triggered at C_{rewind_from_step}. The controller has not
+selected the rollback checkpoint yet. You must choose exactly one valid previous
+checkpoint C_j to restore, then compress the failed branch into useful memory.
+
+The environment state will return to the checkpoint you choose. The knowledge
+state must move forward: record what you did, what result it caused, what you
+learned, what to avoid, and what to try next from the selected checkpoint.
+Do not preserve the full trajectory. Preserve only information useful for future decisions.
 
 # Rewind trigger
 {rewind_reason}
@@ -304,7 +376,7 @@ Do not preserve the full trajectory. Preserve only information useful for future
 # Valid rollback targets
 {valid_targets}
 
-# Relevant checkpoint states
+# Candidate checkpoint states
 {checkpoint_context}
 
 # State at C_{rewind_from_step} before rewinding
@@ -317,7 +389,9 @@ Do not preserve the full trajectory. Preserve only information useful for future
 {reflection_history_context}
 
 # Your task
-Reflect on what went wrong and produce a concise branch memory for the next attempt.
+Reflect on the branch attempt and produce a concise branch memory for the next new attempt direction from the checkpoint you return to.
+
+
 Focus on:
 - Invaild actions that environment not accepted or skipped by the environment;
 - failure reason or likely bad push/walk sequence;
@@ -327,17 +401,24 @@ Focus on:
 - the task is always solvable, so you should always find a concrete improved plan from the checkpoint you return to.
 
 Include a compact branch memory inside <remark> </remark> tags.
-Use this structure, replacing C_j with the checkpoint you choose or confirm:
+Use this structure, replacing C_j with the checkpoint you choose:
 <remark>
-Failure reason: ...
-Useful facts learned: ...
-Avoid repeating: ...
-Next new Plan from C_j: ...
+# History Attempt from C_{history_start_step} to C_{rewind_from_step}
+Selected checkpoint: C_j
+State at C_{rewind_from_step}:
+{current_observation}
+Actions I have done: ...
+What's bad about the actions: ...
+What I have learned: ...
+What I should avoid: ...
+How to move forward that avoid the same mistakes: ...
+Next new Plan from C_j that can move forward and to a different state: ...
 </remark>
 
 End with exactly one final action tag selecting the checkpoint to restore:
 <action>rewind to C_j</action>
 """
+
 
 
 def _action_label(action: int) -> str:
@@ -525,6 +606,25 @@ def _fallback_branch_memory(
     )
 
 
+def _build_checkpoint_choice_context(
+    step_observations: list[str] | None,
+    current_position: int,
+    fallback_observation: str,
+) -> str:
+    if current_position <= 0:
+        return "No previous checkpoint exists."
+
+    lines: list[str] = []
+    for position in range(current_position):
+        observation = (
+            step_observations[position]
+            if step_observations is not None and position < len(step_observations)
+            else fallback_observation
+        )
+        lines.append(f"State at C_{position}:\n{observation}")
+    return _truncate_text("\n\n".join(lines), MAX_BRANCH_HISTORY_CHARS)
+
+
 def _extract_final_action_text(content: str) -> str:
     matches = _ACTION_TAG_RE.findall(content or "")
     if matches:
@@ -592,6 +692,7 @@ async def _do_reflection(
     current_position: int,
     rewind_to_obs: str | None,
     current_observation: str,
+    step_observations: list[str] | None,
     interaction_history: list[dict[str, str]],
     segment_events: list[BranchEvent],
     reflection_history: list[str],
@@ -599,49 +700,59 @@ async def _do_reflection(
     task_id: str,
     history_start: int | None = None,
 ) -> tuple[str, str, str, int | None, str]:
-    """Run reflection LLM call. Returns response, memory, prompt, selected target, parse error."""
-    prompt_history_start = (
-        max(0, min(history_start, current_position)) if history_start is not None else rewind_to
-    )
-    if prompt_history_start is None:
-        prompt_history_start = 0
-    history_after = _build_history_after_rewind(
-        interaction_history=interaction_history,
-        extra_events=segment_events,
-        start=prompt_history_start,
-        end=current_position,
-    )
-
-    valid_targets = _format_checkpoint_range(current_position)
+    """Run reflection LLM call and parse any final rewind target."""
     if rewind_to is None:
-        rewind_target_instruction = (
-            "A forced rewind trigger fired. You must choose the rollback checkpoint in this "
-            "normal reflection response. Choose the latest checkpoint before the likely "
-            "mistake, unless the whole branch should be discarded. Do not choose C_0 unless "
-            "going back to the initial state is truly necessary."
+        # Forced/choice path: the destination is not chosen yet, so list the
+        # branch history from where this segment began.
+        prompt_history_start = (
+            max(0, min(history_start, current_position)) if history_start is not None else 0
         )
-        checkpoint_context = (
-            f"State at C_{prompt_history_start} where this reflected branch context begins:\n"
-            f"{interaction_history[prompt_history_start]['observation_before'] if prompt_history_start < len(interaction_history) else current_observation}"
+        history_after = _build_history_after_rewind(
+            interaction_history=interaction_history,
+            extra_events=segment_events,
+            start=prompt_history_start,
+            end=current_position,
+        )
+        valid_targets = _format_checkpoint_range(current_position)
+        checkpoint_context = _build_checkpoint_choice_context(
+            step_observations=step_observations,
+            current_position=current_position,
+            fallback_observation=current_observation,
+        )
+        reflect_prompt = REWIND_REFLECT_PROMPT_WITH_CKPT_CHOICE.format(
+            rewind_from_step=current_position,
+            valid_targets=valid_targets,
+            checkpoint_context=checkpoint_context,
+            current_observation=current_observation,
+            history_start_step=prompt_history_start,
+            history_after_rewind=history_after,
+            reflection_history_context=_build_reflection_history_context(reflection_history),
+            rewind_reason=rewind_reason,
         )
     else:
-        rewind_target_instruction = (
-            f"The model already requested rewind to C_{rewind_to}. Confirm this target by "
-            f"ending with <action>rewind to C_{rewind_to}</action> while reflecting on the branch."
+        # Model rewind: the destination C_{rewind_to} is known. The prompt's
+        # rewind_to_step is literally that destination, and the branch history
+        # spans C_{rewind_to} -> C_{current_position}.
+        history_after = _build_history_after_rewind(
+            interaction_history=interaction_history,
+            extra_events=segment_events,
+            start=rewind_to,
+            end=current_position,
+        )
+        rewind_target_context = (
+            f"The environment will resume from C_{rewind_to} after this reflection. "
         )
         checkpoint_context = f"State at C_{rewind_to} where execution will resume:\n{rewind_to_obs or ''}"
-
-    reflect_prompt = REWIND_REFLECT_PROMPT.format(
-        rewind_from_step=current_position,
-        rewind_target_instruction=rewind_target_instruction,
-        valid_targets=valid_targets,
-        checkpoint_context=checkpoint_context,
-        current_observation=current_observation,
-        history_start_step=prompt_history_start,
-        history_after_rewind=history_after,
-        reflection_history_context=_build_reflection_history_context(reflection_history),
-        rewind_reason=rewind_reason,
-    )
+        reflect_prompt = REWIND_REFLECT_PROMPT.format(
+            rewind_from_step=current_position,
+            rewind_to_step=rewind_to,
+            rewind_target_context=rewind_target_context,
+            checkpoint_context=checkpoint_context,
+            current_observation=current_observation,
+            history_after_rewind=history_after,
+            reflection_history_context=_build_reflection_history_context(reflection_history),
+            rewind_reason=rewind_reason,
+        )
     reflect_messages = [{"role": "user", "content": reflect_prompt}]
 
     try:
@@ -751,6 +862,8 @@ async def sokoban_rewind_flow(task: Task, config: AgentConfig) -> Episode:
 
     step_budget = int(meta.get("step_budget", DEFAULT_STEP_BUDGET))
     segment_max_turns = int(meta.get("segment_max_turns", DEFAULT_SEGMENT_MAX_TURNS))
+    # max_segments is the single source of truth for how many play segments (and
+    # thus rewinds: rewinds = segments - 1) an episode may run. Default 6.
     max_segments = int(meta.get("max_segments", DEFAULT_MAX_SEGMENTS))
     max_total_turns = int(
         meta.get(
@@ -915,6 +1028,7 @@ async def sokoban_rewind_flow(task: Task, config: AgentConfig) -> Episode:
                     branch_attempts_used += 1
                     content = resp.choices[0].message.content or ""
                 except Exception as e:
+                    failure = classify_llm_failure(e)
                     llm_action_s += time.perf_counter() - t_llm
                     total_llm_calls += 1
                     total_play_turns += 1
@@ -931,23 +1045,23 @@ async def sokoban_rewind_flow(task: Task, config: AgentConfig) -> Episode:
                             chat_completions=list(messages),
                             observation=obs_prompt,
                             model_response="",
-                            action="llm_failed",
-                            thought=f"LLM call failed: {e}",
+                            action=failure.kind,
+                            thought=failure.thought,
                         )
                     )
                     segment_events.append(
                         BranchEvent(
-                            kind="llm_failed",
+                            kind=failure.kind,
                             position_before=current_position,
                             position_after=current_position,
-                            action="llm_failed",
-                            outcome=str(e),
+                            action=failure.kind,
+                            outcome=failure.outcome,
                             observation_after=observation,
                         )
                     )
                     force_rewind = True
                     rewind_kind = "forced"
-                    force_rewind_reason = "forced rewind: LLM call failed"
+                    force_rewind_reason = failure.rewind_reason
                     # Target is selected by the reflection prompt after the segment.
                     break
 
@@ -1090,6 +1204,11 @@ async def sokoban_rewind_flow(task: Task, config: AgentConfig) -> Episode:
                 step_start_observation = observation
                 primitive_events: list[dict[str, str]] = []
                 for action in actions:
+                    if getattr(session, "step_budget_remaining", None) is not None:
+                        remaining = int(session.step_budget_remaining)
+                        if remaining <= 0:
+                            exhausted_reason = "primitive step budget exhausted"
+                            break
                     previous_observation = observation
                     action_label = _action_label(action)
 
@@ -1362,6 +1481,7 @@ async def sokoban_rewind_flow(task: Task, config: AgentConfig) -> Episode:
                     current_position=current_position,
                     rewind_to_obs=rewind_to_obs,
                     current_observation=current_observation,
+                    step_observations=step_observations,
                     interaction_history=interaction_history,
                     segment_events=segment_events,
                     reflection_history=reflection_history,
@@ -1383,7 +1503,7 @@ async def sokoban_rewind_flow(task: Task, config: AgentConfig) -> Episode:
                     action=(
                         f"reflect_branch_memory_and_rewind_to_C_{reflect_rewind_target}"
                         if reflect_rewind_target is not None
-                        else "reflect_branch_memory_invalid_rewind"
+                        else "reflect_branch_memory"
                     ),
                     thought=reflect_content,
                 )
@@ -1401,26 +1521,32 @@ async def sokoban_rewind_flow(task: Task, config: AgentConfig) -> Episode:
                 )
 
             if perform_env_rewind:
-                if reflect_rewind_target is None:
-                    exhausted_reason = (
-                        "reflection did not choose a valid rewind target: "
-                        f"{reflect_parse_error or 'missing final rewind action'}"
-                    )
-                    break
-                if rewind_to is not None and reflect_rewind_target != rewind_to:
+                if rewind_to is None:
+                    if reflect_rewind_target is None:
+                        exhausted_reason = (
+                            "reflection did not choose a valid rewind target: "
+                            f"{reflect_parse_error or 'missing final rewind action'}"
+                        )
+                        break
+                    rewind_to = reflect_rewind_target
+                elif reflect_rewind_target is not None and reflect_rewind_target != rewind_to:
                     exhausted_reason = (
                         f"reflection target C_{reflect_rewind_target} did not match "
-                        f"requested model rewind target C_{rewind_to}"
+                        f"requested rewind target C_{rewind_to}"
                     )
                     break
-                rewind_to = reflect_rewind_target
+
                 segment_events.append(
                     BranchEvent(
-                        kind="reflection_rewind_target",
+                        kind="reflection_rewind_target" if reflect_rewind_target is not None else "rewind_target",
                         position_before=current_position,
                         position_after=rewind_to,
                         action=f"rewind to C_{rewind_to}",
-                        outcome="reflection selected rollback checkpoint",
+                        outcome=(
+                            "reflection selected rollback checkpoint"
+                            if reflect_rewind_target is not None
+                            else "using existing rollback checkpoint"
+                        ),
                         observation_after=step_observations[rewind_to],
                         model_response=reflect_content,
                     )

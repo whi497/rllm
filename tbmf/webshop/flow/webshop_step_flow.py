@@ -19,6 +19,11 @@ import rllm
 from rllm.types import AgentConfig, Episode, Step, Task, Trajectory
 
 try:
+    from ...flow_utils import classify_llm_failure
+except (ImportError, ValueError):
+    from tbmf.flow_utils import classify_llm_failure
+
+try:
     from ..prepare_webshop_data import LAMER_WEBSHOP_CONFIG
     from .webshop_flow import parse_action
     from ..webshop_prompt import get_webshop_prompt
@@ -157,6 +162,8 @@ async def webshop_step_flow(task: Task, config: AgentConfig) -> Episode:
     env_step_s = 0.0
     final_reward = 0.0
     task_score = 0.0
+    llm_failure_kind: str | None = None
+    llm_failure_outcome: str | None = None
 
     async with session:
         for turn in range(max_turns):
@@ -194,7 +201,22 @@ async def webshop_step_flow(task: Task, config: AgentConfig) -> Episode:
                 if turn == 0:
                     logger.info("webshop_step rollout %s: first LLM response received", uid)
             except Exception as e:
-                logger.warning("webshop_step task %s turn %d: LLM call failed: %s", task.id, turn, e)
+                failure = classify_llm_failure(e)
+                llm_failure_kind = failure.kind
+                llm_failure_outcome = failure.outcome
+                logger.warning("webshop_step task %s turn %d: %s", task.id, turn, failure.thought)
+                steps.append(
+                    Step(
+                        chat_completions=messages,
+                        observation=prompt,
+                        model_response="",
+                        action=failure.kind,
+                        thought=failure.thought,
+                        reward=final_reward,
+                        done=True,
+                        metadata={"llm_failure_kind": failure.kind, "outcome": failure.outcome},
+                    )
+                )
                 break
 
             content = resp.choices[0].message.content or ""
@@ -228,7 +250,7 @@ async def webshop_step_flow(task: Task, config: AgentConfig) -> Episode:
                     model_response=content,
                     action=action,
                     thought=content,
-                    reward=float(reward),
+                    reward=float(final_reward),
                     done=bool(done),
                     metadata={
                         "instruction": task_description,
@@ -255,6 +277,8 @@ async def webshop_step_flow(task: Task, config: AgentConfig) -> Episode:
             "turns": len(steps),
             "env_steps": env_steps,
             "last_action": last_action,
+            "llm_failure_kind": llm_failure_kind,
+            "llm_failure_outcome": llm_failure_outcome,
             "session_id": session_id,
             "max_steps": max_steps,
             "max_turns": max_turns,

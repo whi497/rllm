@@ -4,8 +4,12 @@ import os
 import re
 import json
 import random
+import importlib.util
+import sys
+import types
 from collections import defaultdict
 from ast import literal_eval
+from pathlib import Path
 from decimal import Decimal
 
 import cleantext
@@ -13,7 +17,7 @@ from tqdm import tqdm
 from rank_bm25 import BM25Okapi
 from flask import render_template_string
 from rich import print
-from pyserini.search.lucene import LuceneSearcher
+import pyserini
 
 from web_agent_site.utils import (
     BASE_DIR,
@@ -24,6 +28,31 @@ from web_agent_site.utils import (
 )
 
 TEMPLATE_DIR = os.path.join(BASE_DIR, 'templates')
+
+
+def _load_lucene_searcher():
+    """Load sparse LuceneSearcher without importing pyserini dense/faiss modules."""
+
+    pyserini_root = Path(pyserini.__file__).resolve().parent
+    base_path = pyserini_root / 'search' / '_base.py'
+    base_spec = importlib.util.spec_from_file_location('_webshop_pyserini_search_base', base_path)
+    base_module = importlib.util.module_from_spec(base_spec)
+    base_spec.loader.exec_module(base_module)
+
+    search_module = types.ModuleType('pyserini.search')
+    search_module.__path__ = [str(pyserini_root / 'search')]
+    search_module.JQuery = base_module.JQuery
+    search_module.JQueryGenerator = base_module.JQueryGenerator
+    sys.modules['pyserini.search'] = search_module
+
+    searcher_path = pyserini_root / 'search' / 'lucene' / '_searcher.py'
+    spec = importlib.util.spec_from_file_location('_webshop_pyserini_lucene_searcher', searcher_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.LuceneSearcher
+
+
+LuceneSearcher = _load_lucene_searcher()
 
 SEARCH_RETURN_N = 50
 PRODUCT_WINDOW = 10

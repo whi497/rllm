@@ -460,6 +460,19 @@ class DatasetRegistry:
             # Assume it's already a list of dictionaries
             data_list = data
 
+        # Refuse to persist an empty split. A 0-row parquet is written without
+        # errors here, but verl loads it via ``datasets.load_dataset("parquet")``,
+        # whose pyarrow batched reader raises
+        # ``ArrowInvalid: BatchSize must be greater than 0, got 0`` at train time.
+        # Failing loudly at registration turns that opaque mid-training crash into
+        # an actionable error at data-prep time.
+        if not data_list:
+            raise ValueError(
+                f"Refusing to register empty dataset split '{name}/{split}': "
+                "no rows to write. An empty parquet produces an invalid verl input "
+                "(pyarrow 'BatchSize must be greater than 0'). Check the data prep step."
+            )
+
         # Detect binary columns (image bytes)
         has_binary, bin_cols = cls._has_binary_columns(data_list)
 

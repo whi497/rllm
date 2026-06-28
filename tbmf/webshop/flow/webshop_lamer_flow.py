@@ -19,6 +19,11 @@ import rllm
 from rllm.types import AgentConfig, Episode, Step, Task, Trajectory
 
 try:
+    from ...flow_utils import classify_llm_failure
+except (ImportError, ValueError):
+    from tbmf.flow_utils import classify_llm_failure
+
+try:
     from ..prepare_webshop_data import LAMER_WEBSHOP_CONFIG
     from .webshop_flow import (
         parse_action, _build_system_prompt, _build_user_prompt,
@@ -104,6 +109,7 @@ async def webshop_lamer_flow(task: Task, config: AgentConfig) -> Episode:
     env_init_s = 0.0
     env_step_s = 0.0
     current_instruction = ""
+    llm_failure_records: list[dict] = []
 
     for ep_idx in range(num_episodes):
         if not lamer.should_continue and ep_idx > 0:
@@ -161,7 +167,23 @@ async def webshop_lamer_flow(task: Task, config: AgentConfig) -> Episode:
                         model=config.model, messages=model_messages, **sampling, timeout=120,
                     )
                 except Exception as e:
-                    logger.warning("webshop_lamer task %s ep %d turn %d: LLM failed: %s", task.id, ep_idx, turn, e)
+                    failure = classify_llm_failure(e)
+                    logger.warning("webshop_lamer task %s ep %d turn %d: %s", task.id, ep_idx, turn, failure.thought)
+                    llm_failure_records.append(
+                        {"phase": "play", "episode": ep_idx, "turn": turn, "kind": failure.kind, "outcome": failure.outcome}
+                    )
+                    steps.append(
+                        Step(
+                            chat_completions=list(model_messages),
+                            observation=current_prompt,
+                            model_response="",
+                            action=failure.kind,
+                            thought=failure.thought,
+                            reward=0.0,
+                            done=True,
+                            metadata={"llm_failure_kind": failure.kind, "outcome": failure.outcome},
+                        )
+                    )
                     break
 
                 raw_content = resp.choices[0].message.content or ""
@@ -229,7 +251,11 @@ async def webshop_lamer_flow(task: Task, config: AgentConfig) -> Episode:
                 )
                 reflect_content = resp.choices[0].message.content or ""
             except Exception as e:
-                logger.warning("webshop_lamer task %s ep %d: reflect failed: %s", task.id, ep_idx, e)
+                failure = classify_llm_failure(e)
+                logger.warning("webshop_lamer task %s ep %d: reflect %s", task.id, ep_idx, failure.thought)
+                llm_failure_records.append(
+                    {"phase": "reflect", "episode": ep_idx, "turn": None, "kind": failure.kind, "outcome": failure.outcome}
+                )
                 reflect_content = ""
 
             remark_text = parse_remark(reflect_content) if reflect_content else ""
@@ -268,6 +294,7 @@ async def webshop_lamer_flow(task: Task, config: AgentConfig) -> Episode:
             "instruction": current_instruction,
             "num_episodes": num_episodes,
             "traj_gamma": traj_gamma,
+            "llm_failure_records": llm_failure_records,
         },
         is_correct=lamer.won_any,
     )
