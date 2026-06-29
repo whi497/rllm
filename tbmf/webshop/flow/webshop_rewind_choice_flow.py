@@ -350,6 +350,11 @@ async def webshop_rewind_choice_flow(task: Task, config: AgentConfig) -> Episode
     done = False
     final_reward = 0.0
     task_score = 0.0
+    # Dense rubric potential of the currently-viewed product, tracked along the
+    # active checkpoint path (re-derived on replay-based rewind, so it always
+    # reflects the restored state). The per-segment max feeds the rubric-progress
+    # reflection reward, analogous to sokoban A* / alfworld milestone tracking.
+    current_rubric = float(info.get("rubric_score", 0.0))
     total_play_turns = 0
     total_llm_calls = 0
     segment_idx = 0
@@ -376,6 +381,10 @@ async def webshop_rewind_choice_flow(task: Task, config: AgentConfig) -> Episode
             segment_start = len(interaction_history)
             segment_steps: list[Step] = []
             segment_turns = 0
+            # Highest rubric potential reached during this segment (starts from the
+            # rubric standing at the segment's entry checkpoint). Stamped into the
+            # play trajectory as rubric_at_end for the reflection forward-diff.
+            segment_rubric_max = current_rubric
             active_messages = [_message("system", system_prompt)]
             last_valid = True
             force_rewind = False
@@ -520,6 +529,12 @@ async def webshop_rewind_choice_flow(task: Task, config: AgentConfig) -> Episode
                 done = result.done
                 task_score = float(result.info.get("task_score", final_reward))
                 available_actions = result.info.get("available_actions", {})
+                # Dense rubric potential of the now-viewed product (a win realizes
+                # the full purchase rubric == task_score). Track the running value
+                # and this segment's high-water mark.
+                current_rubric = float(result.info.get("rubric_score", current_rubric))
+                if current_rubric > segment_rubric_max:
+                    segment_rubric_max = current_rubric
 
                 if won:
                     outcome = "won"
@@ -541,6 +556,7 @@ async def webshop_rewind_choice_flow(task: Task, config: AgentConfig) -> Episode
                     metadata={
                         "won": won,
                         "task_score": task_score,
+                        "rubric_score": current_rubric,
                         "action_is_valid": action_is_valid,
                         "outcome": outcome,
                     },
@@ -552,6 +568,7 @@ async def webshop_rewind_choice_flow(task: Task, config: AgentConfig) -> Episode
                     "action": action,
                     "outcome": outcome,
                     "task_score": task_score,
+                    "rubric_score": current_rubric,
                     "observation_before": previous_observation,
                     "observation_after": observation,
                     "available_actions_before": previous_actions,
@@ -567,7 +584,12 @@ async def webshop_rewind_choice_flow(task: Task, config: AgentConfig) -> Episode
                     break
 
             if segment_steps:
-                trajectories.append(Trajectory(name=f"webshop_seg{segment_idx}", steps=segment_steps, reward=None))
+                trajectories.append(Trajectory(
+                    name=f"webshop_seg{segment_idx}",
+                    steps=segment_steps,
+                    reward=None,
+                    metadata={"rubric_at_end": segment_rubric_max},
+                ))
             if won or total_play_turns >= step_budget or total_llm_calls >= max_total_turns:
                 if not won and exhausted_reason is None:
                     exhausted_reason = "budget exhausted"
@@ -638,6 +660,15 @@ async def webshop_rewind_choice_flow(task: Task, config: AgentConfig) -> Episode
             available_actions = info.get("available_actions", {})
             instruction = info.get("instruction", instruction)
             task_score = float(info.get("task_score", final_reward))
+            # Restore the rubric potential to the replayed checkpoint state. The
+            # env recomputes rubric_score during replay, so info carries the value
+            # at C_{rewind_to}; fall back to the path history if absent.
+            if "rubric_score" in info:
+                current_rubric = float(info["rubric_score"])
+            elif rewind_to > 0 and interaction_history:
+                current_rubric = float(interaction_history[-1].get("rubric_score", 0.0))
+            else:
+                current_rubric = 0.0
             rewind_log.append({
                 "segment": segment_idx,
                 "kind": rewind_kind,
@@ -662,6 +693,7 @@ async def webshop_rewind_choice_flow(task: Task, config: AgentConfig) -> Episode
             "won": won,
             "success": won,
             "task_score": task_score,
+            "rubric_score": current_rubric,
             "reward": final_reward,
             "turns": total_play_turns,
             "env_steps": len(path_actions),

@@ -127,6 +127,125 @@ def calculate_rloo_advantages(rewards: list[np.ndarray], algorithm_config: Algor
     return advantages_by_group, returns_by_group
 
 
+def _grpo_1d(values: np.ndarray, *, remove_std: bool, epsilon: float = 1e-6) -> np.ndarray:
+    """Group-relative (GRPO-style) normalization of a 1-D array of scalars.
+
+    ``remove_std=True``  -> mean-centering only (``mean_norm``).
+    ``remove_std=False`` -> mean/std normalization (``mean_std_norm``).
+    Groups of size <= 1 get a zero advantage (no relative signal).
+    """
+    arr = np.asarray(values, dtype=np.float64)
+    if arr.size <= 1:
+        return np.zeros_like(arr)
+    mean = arr.mean()
+    if remove_std:
+        return arr - mean
+    return (arr - mean) / (arr.std() + epsilon)
+
+
+@register_rllm_adv_estimator(rLLMAdvantageEstimator.GIGPO)
+def calculate_gigpo_advantages(
+    rewards: list[np.ndarray],
+    algorithm_config: AlgorithmConfig,
+    traj_groups: list[TrajectoryGroup] | None = None,
+    **kwargs,
+) -> tuple[list[np.ndarray], list[np.ndarray]]:
+    """GiGPO (Group-in-Group) advantage: ``A = A_macro + w * A_micro``.
+
+    https://arxiv.org/abs/2505.10978 — adapted to the rLLM trajectory-row model.
+
+    Each trajectory row is expected to carry GiGPO metadata stamped by the flow:
+
+    * ``gigpo_macro_key``   — identifier of the segment instance the row belongs
+      to (all rows of one play segment share it). The *episode-level* (macro)
+      term is GRPO over the one ``gigpo_macro_reward`` per unique macro key, then
+      broadcast back to every row of that segment.
+    * ``gigpo_macro_reward`` — the segment's macro reward S_i (kept as the macro
+      signal, matching the ``accumulated_reflect_diff`` reward flow).
+    * ``gigpo_anchor``      — the environment observation (board) BEFORE the
+      row's action. The *step-level* (micro) term clusters all rows in the group
+      (i.e. across all rollouts/branches of the same task) by identical anchor
+      and GRPO-normalizes ``gigpo_step_return`` within each anchor cluster.
+    * ``gigpo_step_return`` — the row's discounted return-to-go within its branch.
+
+    Groups whose rows lack ``gigpo_anchor`` (e.g. reflection groups) fall back to
+    plain GRPO over the trajectory rewards, so the reflection reward flow is left
+    untouched with no per-role routing config required.
+
+    Macro normalization follows ``norm_adv_by_std_in_grpo``; micro normalization
+    follows ``gigpo_mode`` (``mean_norm`` -> mean-only, ``mean_std_norm`` ->
+    mean/std).
+    """
+    assert traj_groups is not None, "gigpo estimator requires traj_groups (injected by the orchestrator)"
+
+    w = float(algorithm_config.gigpo_step_advantage_w)
+    micro_remove_std = algorithm_config.gigpo_mode == "mean_norm"
+
+    advantages_by_group: list[np.ndarray] = []
+    returns_by_group: list[np.ndarray] = []
+
+    for group_rewards, group in zip(rewards, traj_groups, strict=True):
+        trajs = group.trajectories
+        metas = [t.metadata or {} for t in trajs]
+        n = len(trajs)
+
+        # A group is a "gigpo" (play) group if ANY row carries an anchor. Rows
+        # without an anchor (invalid/truncated/rewind turns interleaved in a
+        # reveal-granularity play group) get macro-only credit. Groups with no
+        # anchored row at all (e.g. reflections) fall back to plain GRPO so the
+        # reflection reward flow is left untouched.
+        if not any("gigpo_anchor" in m for m in metas):
+            adv, ret = calculate_grpo_advantages_per_group(
+                np.asarray(group_rewards, dtype=np.float64),
+                norm_adv_by_std_in_grpo=algorithm_config.norm_adv_by_std_in_grpo,
+            )
+            advantages_by_group.append(adv)
+            returns_by_group.append(ret)
+            continue
+
+        macro_keys = [str(m.get("gigpo_macro_key", trajs[i].uid)) for i, m in enumerate(metas)]
+        macro_rewards = [float(m.get("gigpo_macro_reward", group_rewards[i])) for i, m in enumerate(metas)]
+
+        # Episode-level (macro): GRPO over one value per unique segment instance,
+        # then broadcast back to all rows of that segment. Uses the repo's own
+        # per-group GRPO so the macro term is byte-identical to plain GRPO,
+        # including its singleton convention (size-1 group -> raw value, mean=0
+        # std=1), which also matches the reference GiGPO episode_norm_reward.
+        first_seen: dict[str, int] = {}
+        uniq_macro_vals: list[float] = []
+        for key, val in zip(macro_keys, macro_rewards):
+            if key not in first_seen:
+                first_seen[key] = len(uniq_macro_vals)
+                uniq_macro_vals.append(val)
+        macro_adv_uniq, _ = calculate_grpo_advantages_per_group(
+            np.asarray(uniq_macro_vals, dtype=np.float64),
+            norm_adv_by_std_in_grpo=algorithm_config.norm_adv_by_std_in_grpo,
+        )
+        macro_adv_by_key = {key: float(macro_adv_uniq[pos]) for key, pos in first_seen.items()}
+
+        # Step-level (micro): cluster ONLY anchored rows by identical anchor board
+        # and GRPO-normalize their per-row discounted return within each cluster.
+        # Non-anchored rows keep micro=0 (macro-only credit).
+        step_returns = [float(m.get("gigpo_step_return", 0.0)) for m in metas]
+        anchor_clusters: dict[str, list[int]] = defaultdict(list)
+        for i, m in enumerate(metas):
+            if "gigpo_anchor" in m:
+                anchor_clusters[str(m.get("gigpo_anchor"))].append(i)
+
+        micro_adv = np.zeros(n, dtype=np.float64)
+        for idxs in anchor_clusters.values():
+            cluster_adv = _grpo_1d(np.asarray([step_returns[i] for i in idxs]), remove_std=micro_remove_std)
+            for j, i in enumerate(idxs):
+                micro_adv[i] = cluster_adv[j]
+
+        final = np.asarray([macro_adv_by_key[macro_keys[i]] + w * micro_adv[i] for i in range(n)], dtype=np.float64)
+        advantages_by_group.append(final)
+        returns_by_group.append(final)
+
+    return advantages_by_group, returns_by_group
+
+
+
 def _collect_precomputed_advantages(group: TrajectoryGroup, group_role: str) -> list[float]:
     """Collect pre-computed per-token advantages from all steps.
 

@@ -19,6 +19,13 @@ Available flows (``+rllm.flow=<key>``):
                              AS-IS (segment i gets S_i, no discount / no terminal
                              collapse); reflections get the same forward diff
                              S_{k+1}-S_k.
+  - ``gigpo``              : GiGPO (group-in-group) advantage on the play side.
+                             Macro = S_i (as in accumulated_reflect_diff); micro =
+                             per-anchor-board step return. Set
+                             ``algorithm.adv_estimator=gigpo`` and pick the step
+                             granularity with
+                             ``+rllm.task_metadata_overrides.gigpo_granularity=segment|reveal``.
+                             Reflections are untouched (auto plain-GRPO fallback).
   - ``segment_novelty_gate``: like reflect_reward_diff plus a segment-level play
                              reward zeroed when the segment produced no new env state.
 
@@ -57,6 +64,7 @@ try:
     from ..flow.minisweeper_rewind_reflect_reward_diff import minisweeper_rewind_reflect_reward_diff_flow
     from ..flow.minisweeper_rewind_discounted_reflect_diff import minisweeper_rewind_discounted_reflect_diff_flow
     from ..flow.minisweeper_rewind_accumulated_reflect_diff import minisweeper_rewind_accumulated_reflect_diff_flow
+    from ..flow.minisweeper_rewind_gigpo import minisweeper_rewind_gigpo_flow
     from ..flow.minisweeper_rewind_segment_novelty_gate import minisweeper_rewind_segment_novelty_gate_flow
 except (ImportError, ValueError):
     from eval.minisweeper_eval import minisweeper_evaluator
@@ -67,6 +75,7 @@ except (ImportError, ValueError):
     from flow.minisweeper_rewind_reflect_reward_diff import minisweeper_rewind_reflect_reward_diff_flow
     from flow.minisweeper_rewind_discounted_reflect_diff import minisweeper_rewind_discounted_reflect_diff_flow
     from flow.minisweeper_rewind_accumulated_reflect_diff import minisweeper_rewind_accumulated_reflect_diff_flow
+    from flow.minisweeper_rewind_gigpo import minisweeper_rewind_gigpo_flow
     from flow.minisweeper_rewind_segment_novelty_gate import minisweeper_rewind_segment_novelty_gate_flow
 
 try:
@@ -87,6 +96,7 @@ REWIND_FLOWS = {
     "reflect_reward_diff": minisweeper_rewind_reflect_reward_diff_flow,
     "discounted_reflect_diff": minisweeper_rewind_discounted_reflect_diff_flow,
     "accumulated_reflect_diff": minisweeper_rewind_accumulated_reflect_diff_flow,
+    "gigpo": minisweeper_rewind_gigpo_flow,
     "segment_novelty_gate": minisweeper_rewind_segment_novelty_gate_flow,
 }
 

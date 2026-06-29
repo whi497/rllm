@@ -186,6 +186,7 @@ class rLLMAdvantageEstimator(str, Enum):
     REINFORCE = "reinforce"
     REINFORCE_PLUS_PLUS_BASELINE = "reinforce_plus_plus_baseline"
     RLOO = "rloo"
+    GIGPO = "gigpo"
     OTHER = "other"
 
     @classmethod
@@ -215,6 +216,13 @@ class AlgorithmConfig:
     # TODO(listar2000): eventually we will remove the `per_step` mode all-together. Now we keep it for backward compatibility.
     stepwise_advantage_mode: Literal["broadcast", "per_step"] = "broadcast"
     norm_adv_by_std_in_grpo: bool = True
+    # GiGPO (group-in-group) hyperparameters. Only consulted when the estimator
+    # is `gigpo`. step_advantage_w weights the step/anchor-level term that is
+    # added to the episode-level (macro) advantage; mode selects mean-only
+    # ("mean_norm") vs mean/std ("mean_std_norm") normalization within each
+    # anchor group.
+    gigpo_step_advantage_w: float = 1.0
+    gigpo_mode: Literal["mean_norm", "mean_std_norm"] = "mean_norm"
     # When True, always use pre-computed step.advantage from the workflow and skip
     # advantage computation (GRPO/REINFORCE). Steps missing advantages default to 0.0.
     # When False (default), always compute advantages normally.
@@ -257,12 +265,15 @@ class AlgorithmConfig:
             bypass_mode=rc_section.get("bypass_mode", None),
             tis_cap=rc_section.get("tis_cap", 2.0),
         )
+        gigpo_section = algorithm_config.get("gigpo", {}) or {}
         return cls(
             estimator=rLLMAdvantageEstimator(algorithm_config.adv_estimator),
             estimator_map=estimator_map or {},
             stepwise_advantage_mode=stepwise_advantage_mode,
             norm_adv_by_std_in_grpo=algorithm_config.get("norm_adv_by_std_in_grpo", True),
             use_precomputed_advantage=algorithm_config.get("use_precomputed_advantage", False),
+            gigpo_step_advantage_w=gigpo_section.get("step_advantage_w", 1.0),
+            gigpo_mode=gigpo_section.get("mode", "mean_norm"),
             loss_fn=algorithm_config.get("loss_fn", None),
             lr_schedule=algorithm_config.get("lr_schedule", "constant"),
             warmup_steps=algorithm_config.get("warmup_steps", -1),

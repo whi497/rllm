@@ -15,11 +15,17 @@ except (ImportError, ValueError):
 @rllm.rollout(name="alfworld_rewind_accumulated_reflect_diff")
 async def alfworld_rewind_accumulated_reflect_diff_flow(task: Task, config: AgentConfig) -> Episode:
     episode = await alfworld_rewind_choice_flow.arun(task, config)
-    traj_grouping = str((task.metadata or {}).get("traj_grouping", "merged"))
+    meta = task.metadata or {}
+    traj_grouping = str(meta.get("traj_grouping", "merged"))
+    # "cum_reward" (default): reflection reward = forward diff of segment score.
+    # "milestone": reflection reward = forward diff of expert-milestone progress
+    # (requires the choice flow to have stamped milestone_at_end metadata).
+    reflect_reward_source = str(meta.get("reflect_reward_source", "cum_reward"))
     return annotate_rewind_episode(
         episode,
         prefix="alfworld",
         traj_grouping=traj_grouping,
         score_key="won",
         variant="accumulated_reflect_diff",
+        reflect_reward_source=reflect_reward_source,
     )

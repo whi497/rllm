@@ -65,18 +65,42 @@ def annotate_rewind_episode(
         "accumulated_reflect_diff",
         "segment_novelty_gate",
     ],
+    reflect_reward_source: str = "cum_reward",
 ) -> Episode:
     """Rewrite a rewind-choice episode to match a reward variant.
 
     The ALFWorld/WebShop rewind-choice flows already implement the environment
     and reflection semantics. This helper applies the same naming and reward
     policies used by the MiniSweeper/Sokoban rewind reward family.
+
+    ``reflect_reward_source`` selects how reflection rewards are computed:
+      - ``"cum_reward"`` (default): forward diff of the per-segment score
+        (``next_score - current_score``).
+      - ``"milestone"``: forward diff of the expert-milestone count stored in
+        each play segment's ``metadata["milestone_at_end"]`` (mirrors LaMer
+        alfworld's separated reflect reward).
+      - ``"rubric_progress"``: forward diff of the dense WebShop rubric potential
+        stored in each play segment's ``metadata["rubric_at_end"]`` (the
+        type/attribute/option/price decomposition scored against the currently
+        viewed product). Play-segment rewards are unaffected by this switch.
     """
+    # Maps the progress source to the play-segment metadata key it differences.
+    _PROGRESS_METADATA_KEY = {
+        "milestone": "milestone_at_end",
+        "rubric_progress": "rubric_at_end",
+    }
+    if reflect_reward_source not in ("cum_reward", "milestone", "rubric_progress"):
+        raise ValueError(
+            f"Unknown reflect_reward_source={reflect_reward_source!r}; valid values are "
+            "'cum_reward', 'milestone', and 'rubric_progress'."
+        )
+    progress_key = _PROGRESS_METADATA_KEY.get(reflect_reward_source)
 
     won = bool(episode.artifacts.get("won", episode.artifacts.get("success", False)))
     final_reward = 1.0 if won else 0.0
     play_entries: list[tuple[int, int, float]] = []
     reflect_entries: list[tuple[int, int]] = []
+    progress_by_segment: dict[int, float] = {}
 
     for order, traj in enumerate(episode.trajectories):
         if traj.name.startswith(f"{prefix}_seg"):
@@ -84,6 +108,8 @@ def annotate_rewind_episode(
             produced_new_state = any(_step_produced_new_state(step) for step in traj.steps)
             score = _trajectory_score(traj, score_key)
             metadata = dict(traj.metadata or {})
+            if progress_key is not None:
+                progress_by_segment[segment_idx] = float(metadata.get(progress_key, 0.0))
             metadata.update(
                 {
                     "role": PLAY_ROLE,
@@ -126,9 +152,17 @@ def annotate_rewind_episode(
             episode.trajectories[idx].reward = final_reward
 
     for segment_idx, idx in reflect_entries:
-        current_score = scores_by_segment.get(segment_idx, 0.0)
-        next_score = scores_by_segment.get(segment_idx + 1, current_score)
-        episode.trajectories[idx].reward = next_score - current_score
+        if progress_key is not None:
+            # Forward diff of the chosen progress signal (expert milestones or the
+            # dense rubric potential); positive when the next attempt advanced
+            # further than where this reflection was triggered.
+            current = progress_by_segment.get(segment_idx, 0.0)
+            nxt = progress_by_segment.get(segment_idx + 1, current)
+            episode.trajectories[idx].reward = nxt - current
+        else:
+            current_score = scores_by_segment.get(segment_idx, 0.0)
+            next_score = scores_by_segment.get(segment_idx + 1, current_score)
+            episode.trajectories[idx].reward = next_score - current_score
 
     return episode
 

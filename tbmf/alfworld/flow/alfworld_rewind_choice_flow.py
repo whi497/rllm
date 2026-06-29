@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 import logging
 import os
 import re
@@ -22,6 +23,14 @@ try:
 except (ImportError, ValueError):
     from alfworld_flow import SYSTEM_PROMPT, parse_action
 
+try:
+    from ..milestone_loader import MilestoneLoader
+except (ImportError, ValueError):
+    try:
+        from milestone_loader import MilestoneLoader
+    except (ImportError, ValueError):
+        MilestoneLoader = None
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_SEGMENT_MAX_TURNS = 12
@@ -35,6 +44,45 @@ MAX_BRANCH_HISTORY_CHARS = 18000
 _ACTION_RE = re.compile(r"```action\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
 _GENERIC_RE = re.compile(r"```(?!action\b)\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
 _REWIND_RE = re.compile(r"rewind\s+to\s+(?:C\s*[_-]?\s*)?(\d+)\s*$", re.IGNORECASE)
+
+# Expert-milestone matching threshold (matches LaMer alfworld's 0.85).
+_MILESTONE_THRESHOLD = 0.85
+
+
+def _gamefile_to_trial_id(gamefile_path: str | None) -> str | None:
+    """Extract trial_id from a game.tw-pddl path for milestone lookup.
+
+    Path format: .../task_type-Object-Location-N/trial_T<ts>/game.tw-pddl
+    trial_id format: task_type-Object-Location-N_trial_T<ts> (matches alfworld.json ids).
+    """
+    if not gamefile_path:
+        return None
+    parts = gamefile_path.replace("\\", "/").split("/")
+    try:
+        game_idx = parts.index("game.tw-pddl") if "game.tw-pddl" in parts else len(parts) - 1
+        trial_part = parts[game_idx - 1]
+        task_part = parts[game_idx - 2]
+        return f"{task_part}_{trial_part}"
+    except (IndexError, ValueError):
+        return None
+
+
+def _count_milestones(path_actions: list[str], milestones: list[str] | None) -> int:
+    """Greedy in-order fuzzy match of executed actions against expert milestones.
+
+    Mirrors LaMer's match: advance a monotone pointer ``k`` whenever the next
+    executed action matches the current expected milestone with SequenceMatcher
+    ratio >= 0.85. Returns how many expert sub-goals were reproduced in order.
+    """
+    if not milestones:
+        return 0
+    k = 0
+    for action in path_actions:
+        if k >= len(milestones):
+            break
+        if SequenceMatcher(None, action, milestones[k]).ratio() >= _MILESTONE_THRESHOLD:
+            k += 1
+    return k
 
 
 @dataclass(frozen=True)
@@ -288,6 +336,18 @@ async def alfworld_rewind_choice_flow(task: Task, config: AgentConfig) -> Episod
     task_type = meta.get("task_type", "unknown")
     uid = config.session_uid or task.id
 
+    # Expert-trajectory milestones for this game instance (used only when the
+    # caller selects the milestone-diff reflection reward; harmless otherwise).
+    milestone_trial_id = _gamefile_to_trial_id(game_file)
+    expert_milestones: list[str] | None = None
+    if MilestoneLoader is not None and milestone_trial_id is not None:
+        try:
+            expert_milestones = MilestoneLoader().get_milestones(milestone_trial_id)
+        except Exception as e:  # noqa: BLE001 - milestone data is best-effort
+            logger.warning("alfworld_rewind_choice %s: milestone load failed: %s", uid, e)
+            expert_milestones = None
+    total_milestones = len(expert_milestones) if expert_milestones else 0
+
     client = AsyncOpenAI(base_url=config.base_url, api_key="EMPTY")
     sampling = {k: v for k, v in config.sampling_params.items() if k != "top_k"}
 
@@ -516,7 +576,20 @@ async def alfworld_rewind_choice_flow(task: Task, config: AgentConfig) -> Episod
                     break
 
             if segment_steps:
-                trajectories.append(Trajectory(name=f"alfworld_seg{segment_idx}", steps=segment_steps, reward=None))
+                # Milestone count along the active path at this segment's end.
+                # Milestones are monotone along path_actions, so the path-end count
+                # equals the segment max; a win is credited the full expert length
+                # (mirrors LaMer alfworld). Stored for the milestone-diff reflection
+                # reward; ignored by the default cum_reward source.
+                seg_milestone = (
+                    total_milestones if won else _count_milestones(path_actions, expert_milestones)
+                )
+                trajectories.append(Trajectory(
+                    name=f"alfworld_seg{segment_idx}",
+                    steps=segment_steps,
+                    reward=None,
+                    metadata={"milestone_at_end": seg_milestone},
+                ))
             if won or total_play_turns >= step_budget or total_llm_calls >= max_total_turns:
                 if not won and exhausted_reason is None:
                     exhausted_reason = "budget exhausted"
@@ -620,6 +693,8 @@ async def alfworld_rewind_choice_flow(task: Task, config: AgentConfig) -> Episod
             "total_play_turns": total_play_turns,
             "total_llm_calls": total_llm_calls,
             "segments": segment_idx + 1,
+            "total_milestones": total_milestones,
+            "has_milestones": expert_milestones is not None,
             "rewinds": len(rewind_log),
             "forced_rewinds": forced_rewinds,
             "model_rewinds": model_rewinds,

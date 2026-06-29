@@ -65,8 +65,12 @@ trainer:
 
 # Algorithm Configuration
 algorithm:
-  adv_estimator: grpo # [grpo, reinforce, reinforce_plus_plus_baseline, rloo]
+  adv_estimator: grpo # [grpo, reinforce, reinforce_plus_plus_baseline, rloo, gigpo]
   norm_adv_by_std_in_grpo: true
+  # GiGPO (group-in-group) knobs; only used when adv_estimator=gigpo.
+  gigpo:
+    step_advantage_w: 1.0      # weight on the step/anchor-level term (A = A_macro + w*A_micro)
+    mode: mean_norm            # [mean_norm, mean_std_norm] normalization within each anchor cluster
   use_rllm: null  # deprecated, unified trainer only support rllm advantage estimators
   use_precomputed_advantage: false # use pre-computed step.advantage from the workflow (e.g. distillation)
   loss_fn: null           # backend-specific values; null = backend default
