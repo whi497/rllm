@@ -75,7 +75,7 @@ try:
     from ..flow.minisweeper_rewind_accumulated_reflect_diff import minisweeper_rewind_accumulated_reflect_diff_flow
     from ..flow.minisweeper_rewind_gigpo import minisweeper_rewind_gigpo_flow
     from ..flow.minisweeper_rewind_segment_novelty_gate import minisweeper_rewind_segment_novelty_gate_flow
-    from ..flow.minisweeper_rewind_kind_aware import (
+    from ..flow.minisweeper_rewind_kind_aware_runtime import (
         minisweeper_rewind_kind_force_discount_flow,
         minisweeper_rewind_kind_force_penalty_flow,
         minisweeper_rewind_kind_model_rewind_flow,
@@ -94,7 +94,7 @@ except (ImportError, ValueError):
     from flow.minisweeper_rewind_accumulated_reflect_diff import minisweeper_rewind_accumulated_reflect_diff_flow
     from flow.minisweeper_rewind_gigpo import minisweeper_rewind_gigpo_flow
     from flow.minisweeper_rewind_segment_novelty_gate import minisweeper_rewind_segment_novelty_gate_flow
-    from flow.minisweeper_rewind_kind_aware import (
+    from flow.minisweeper_rewind_kind_aware_runtime import (
         minisweeper_rewind_kind_force_discount_flow,
         minisweeper_rewind_kind_force_penalty_flow,
         minisweeper_rewind_kind_model_rewind_flow,
