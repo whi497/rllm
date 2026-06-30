@@ -18,7 +18,8 @@ Available flows (``+rllm.flow=<key>``):
   - ``accumulated_reflect_diff``: play segments get the path-cumulative env reward
                              AS-IS (segment i gets S_i, no discount / no terminal
                              collapse); reflections get the same forward diff
-                             S_{k+1}-S_k.
+                             S_{k+1}-S_k.  This is the A0 baseline for the
+                             kind-aware ablation sweep below.
   - ``gigpo``              : GiGPO (group-in-group) advantage on the play side.
                              Macro = S_i (as in accumulated_reflect_diff); micro =
                              per-anchor-board step return. Set
@@ -28,6 +29,14 @@ Available flows (``+rllm.flow=<key>``):
                              Reflections are untouched (auto plain-GRPO fallback).
   - ``segment_novelty_gate``: like reflect_reward_diff plus a segment-level play
                              reward zeroed when the segment produced no new env state.
+
+Kind-aware active-rewind ablation flows:
+  - ``kind_force_discount``: A1, terminal success is discounted by forced rewinds.
+  - ``kind_force_penalty`` : A2, A1 + explicit forced-rewind event penalty.
+  - ``kind_model_rewind``  : A3, A2 + model-rewind decision trajectory reward.
+  - ``kind_potential``     : A4, A3 + segment potential / efficiency shaping.
+  - ``kind_opportunity``   : A5, A4 + rewind opportunity card in the action prompt.
+  - ``kind_structured``    : A6, A5 + structured branch memory + repeat penalty.
 
 Trajectory grouping is an independent knob (``+rllm.traj_grouping=<mode>``), read by
 the flows from task metadata:
@@ -48,8 +57,8 @@ flow selection.
 
 Usage::
 
-    python3 -m tbmf.minisweeper.train.train rllm/backend=verl \\
-        +rllm.flow=reflect_reward_diff +rllm.traj_grouping=per_stage
+    python3 -m tbmf.minisweeper.train.train rllm/backend=verl \
+        +rllm.flow=kind_structured +rllm.traj_grouping=per_stage
 """
 
 import hydra
@@ -66,6 +75,14 @@ try:
     from ..flow.minisweeper_rewind_accumulated_reflect_diff import minisweeper_rewind_accumulated_reflect_diff_flow
     from ..flow.minisweeper_rewind_gigpo import minisweeper_rewind_gigpo_flow
     from ..flow.minisweeper_rewind_segment_novelty_gate import minisweeper_rewind_segment_novelty_gate_flow
+    from ..flow.minisweeper_rewind_kind_aware import (
+        minisweeper_rewind_kind_force_discount_flow,
+        minisweeper_rewind_kind_force_penalty_flow,
+        minisweeper_rewind_kind_model_rewind_flow,
+        minisweeper_rewind_kind_potential_flow,
+        minisweeper_rewind_kind_opportunity_flow,
+        minisweeper_rewind_kind_structured_flow,
+    )
 except (ImportError, ValueError):
     from eval.minisweeper_eval import minisweeper_evaluator
     from eval.minisweeper_rewind_eval import minisweeper_rewind_evaluator
@@ -77,6 +94,14 @@ except (ImportError, ValueError):
     from flow.minisweeper_rewind_accumulated_reflect_diff import minisweeper_rewind_accumulated_reflect_diff_flow
     from flow.minisweeper_rewind_gigpo import minisweeper_rewind_gigpo_flow
     from flow.minisweeper_rewind_segment_novelty_gate import minisweeper_rewind_segment_novelty_gate_flow
+    from flow.minisweeper_rewind_kind_aware import (
+        minisweeper_rewind_kind_force_discount_flow,
+        minisweeper_rewind_kind_force_penalty_flow,
+        minisweeper_rewind_kind_model_rewind_flow,
+        minisweeper_rewind_kind_potential_flow,
+        minisweeper_rewind_kind_opportunity_flow,
+        minisweeper_rewind_kind_structured_flow,
+    )
 
 try:
     from .multi_pass import MultiPassConfig, MultiPassEvaluator, MultiPassFlow, ValidationPass
@@ -98,6 +123,13 @@ REWIND_FLOWS = {
     "accumulated_reflect_diff": minisweeper_rewind_accumulated_reflect_diff_flow,
     "gigpo": minisweeper_rewind_gigpo_flow,
     "segment_novelty_gate": minisweeper_rewind_segment_novelty_gate_flow,
+    # A1--A6 kind-aware active-rewind ablations.
+    "kind_force_discount": minisweeper_rewind_kind_force_discount_flow,
+    "kind_force_penalty": minisweeper_rewind_kind_force_penalty_flow,
+    "kind_model_rewind": minisweeper_rewind_kind_model_rewind_flow,
+    "kind_potential": minisweeper_rewind_kind_potential_flow,
+    "kind_opportunity": minisweeper_rewind_kind_opportunity_flow,
+    "kind_structured": minisweeper_rewind_kind_structured_flow,
 }
 
 DEFAULT_FLOW = "refacted"
